@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ctrace.schema import Capabilities, TraceEvent, build_envelope
+
 import psutil
 
 SCRIPTS_DIR = Path(__file__).parent / "scripts"
@@ -109,6 +111,53 @@ class Backend(ABC):
 
     def __init__(self) -> None:
         self.sessions = SessionManager()
+
+    @property
+    @abstractmethod
+    def backend_name(self) -> str:
+        """Return backend identifier, e.g. 'dtrace' or 'bpftrace'."""
+
+    def _default_capabilities(self) -> Capabilities:
+        """Return default capabilities for this backend. Override in subclasses."""
+        return Capabilities(
+            has_user_stacks=False,
+            has_kernel_stacks=False,
+            has_args=False,
+            has_retval=False,
+            has_tid=False,
+            timing_source="derived",
+        )
+
+    def _wrap(
+        self,
+        *,
+        tool: str,
+        session_id: str,
+        pid: int,
+        duration_s: float,
+        events: list[TraceEvent] | None = None,
+        aggregates: dict[str, Any] | None = None,
+        raw_output: str | None = None,
+        warnings: list[str] | None = None,
+        errors: list[str] | None = None,
+        capabilities: Capabilities | None = None,
+        legacy: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build a trace envelope for a tool response."""
+        return build_envelope(
+            backend=self.backend_name,
+            session_id=session_id,
+            pid=pid,
+            tool=tool,
+            duration_s=duration_s,
+            capabilities=capabilities or self._default_capabilities(),
+            events=events,
+            aggregates=aggregates,
+            raw_output=raw_output,
+            warnings=warnings,
+            errors=errors,
+            legacy=legacy,
+        )
 
     @abstractmethod
     def tracer_cmd(self) -> list[str]:
