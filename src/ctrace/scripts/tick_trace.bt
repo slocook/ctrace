@@ -1,0 +1,13 @@
+/* Tick/frame tracing template for bpftrace */
+/* Replace BINARY and TICK_FUNC with actual values */
+
+uprobe:BINARY:TICK_FUNC /pid == $1/ {
+    @tick_start[tid] = nsecs;
+}
+
+uretprobe:BINARY:TICK_FUNC /pid == $1 && @tick_start[tid]/ {
+    $dur = (nsecs - @tick_start[tid]) / 1000;
+    printf("TICK|%d\n", $dur);
+    @durations = hist($dur);
+    delete(@tick_start[tid]);
+}

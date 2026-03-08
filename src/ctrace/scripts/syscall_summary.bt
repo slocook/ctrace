@@ -1,0 +1,13 @@
+/* Syscall summary for bpftrace */
+/* Usage: sudo bpftrace -e '@' -p <PID> */
+
+tracepoint:raw_syscalls:sys_enter /pid == $1/ {
+    @start[tid] = nsecs;
+    @counts[ksym(*(kaddr("sys_call_table") + args.id * 8))] = count();
+}
+
+tracepoint:raw_syscalls:sys_exit /pid == $1 && @start[tid]/ {
+    $dur = (nsecs - @start[tid]) / 1000;
+    @latency[ksym(*(kaddr("sys_call_table") + args.id * 8))] = sum($dur);
+    delete(@start[tid]);
+}

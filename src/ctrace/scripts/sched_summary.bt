@@ -1,0 +1,13 @@
+/* Scheduling summary for bpftrace */
+
+tracepoint:sched:sched_switch /args.prev_pid == $1/ {
+    @off_start[tid] = nsecs;
+    @ctx_switches[tid] = count();
+}
+
+tracepoint:sched:sched_switch /args.next_pid == $1 && @off_start[tid]/ {
+    $dur = (nsecs - @off_start[tid]) / 1000;
+    @off_cpu[tid] = sum($dur);
+    @wakeup_lat[tid] = avg($dur);
+    delete(@off_start[tid]);
+}

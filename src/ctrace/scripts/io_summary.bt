@@ -1,0 +1,17 @@
+/* I/O summary for bpftrace */
+
+tracepoint:syscalls:sys_enter_read,
+tracepoint:syscalls:sys_enter_write /pid == $1/ {
+    @io_start[tid] = nsecs;
+    @io_fd[tid] = args.fd;
+}
+
+tracepoint:syscalls:sys_exit_read,
+tracepoint:syscalls:sys_exit_write /pid == $1 && @io_start[tid]/ {
+    $dur = (nsecs - @io_start[tid]) / 1000;
+    @io_count[comm] = count();
+    @io_bytes[comm] = sum(args.ret > 0 ? args.ret : 0);
+    @io_latency[comm] = avg($dur);
+    delete(@io_start[tid]);
+    delete(@io_fd[tid]);
+}

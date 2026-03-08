@@ -1,0 +1,16 @@
+/* Allocation tracing for bpftrace */
+
+uprobe:/lib/x86_64-linux-gnu/libc.so.6:malloc /pid == $1/ {
+    @malloc_count = count();
+    @malloc_bytes = sum(arg0);
+    @malloc_sizes = hist(arg0);
+}
+
+uprobe:/lib/x86_64-linux-gnu/libc.so.6:free /pid == $1/ {
+    @free_count = count();
+}
+
+uprobe:/lib/x86_64-linux-gnu/libc.so.6:realloc /pid == $1/ {
+    @realloc_count = count();
+    @realloc_bytes = sum(arg1);
+}

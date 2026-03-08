@@ -1,0 +1,27 @@
+[project]
+name = "ctrace"
+version = "0.1.0"
+description = "AI-friendly live tracing MCP server wrapping dtrace/bpftrace"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=2.0.0",
+    "psutil>=5.9.0",
+]
+
+[project.scripts]
+ctrace-mcp = "ctrace:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctrace"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
