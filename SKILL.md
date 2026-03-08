@@ -30,8 +30,14 @@ ctrace is an MCP server that wraps dtrace (macOS) and bpftrace (Linux) for non-i
 ### Custom Tracing
 - `ctrace_probe(script="...")` — run any dtrace/bpftrace script with `$target` as PID placeholder
 
+### Session Management
+- `ctrace_sessions()` — list all active sessions
+- `ctrace_kill_session(session_id="s1")` — remove a session (does NOT kill the process)
+- `ctrace_list_ticks()` — list defined tick loops
+
 ## Tips
 - Default trace duration is 5 seconds. Use 1-2s for quick checks, 10-30s for rare events.
 - Tick analysis requires the binary to have symbols (compile with `-g`).
 - All tools accept optional `session_id` — only needed with multiple sessions.
 - Multiple sessions can be active simultaneously for comparing processes.
+- All 21 tools are discoverable via MCP `list_tools`.
