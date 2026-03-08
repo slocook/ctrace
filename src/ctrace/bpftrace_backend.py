@@ -47,7 +47,7 @@ class BpftraceBackend(Backend):
                 ["ldconfig", "-p"], capture_output=True, text=True, timeout=5
             )
             for line in result.stdout.splitlines():
-                if "libc.so.6" in line and "x86_64" in line:
+                if "libc.so.6" in line and ("x86_64" in line or "x86-64" in line):
                     path = line.split("=>")[-1].strip()
                     self._libc_path = path
                     return path
@@ -70,14 +70,14 @@ class BpftraceBackend(Backend):
         session = self.sessions.get_default(session_id)
         pid = session.pid
         script = f"""
-tracepoint:raw_syscalls:sys_enter /pid == {pid}/ {{
+tracepoint:syscalls:sys_enter_* /pid == {pid}/ {{
     @start[tid] = nsecs;
-    @counts[ksym(*(kaddr("sys_call_table") + args.id * 8))] = count();
+    @counts[probe] = count();
 }}
 
-tracepoint:raw_syscalls:sys_exit /pid == {pid} && @start[tid]/ {{
+tracepoint:syscalls:sys_exit_* /pid == {pid} && @start[tid]/ {{
     $dur = (nsecs - @start[tid]) / 1000;
-    @latency[ksym(*(kaddr("sys_call_table") + args.id * 8))] = sum($dur);
+    @latency[probe] = sum($dur);
     delete(@start[tid]);
 }}
 
@@ -307,15 +307,15 @@ interval:s:{int(duration)} {{ exit(); }}
         pid = session.pid
         script = f"""
 tracepoint:sched:sched_switch /args.prev_pid == {pid}/ {{
-    @off_start[args.prev_pid, tid] = nsecs;
-    @ctx_switches[tid] = count();
+    @off_start[args.prev_pid] = nsecs;
+    @ctx_switches[args.prev_pid] = count();
 }}
 
-tracepoint:sched:sched_switch /args.next_pid == {pid} && @off_start[{pid}, tid]/ {{
-    $dur = (nsecs - @off_start[{pid}, tid]) / 1000;
-    @off_cpu[tid] = sum($dur);
-    @wakeup_lat[tid] = avg($dur);
-    delete(@off_start[{pid}, tid]);
+tracepoint:sched:sched_switch /args.next_pid == {pid} && @off_start[args.next_pid]/ {{
+    $dur = (nsecs - @off_start[args.next_pid]) / 1000;
+    @off_cpu[args.next_pid] = sum($dur);
+    @wakeup_lat[args.next_pid] = avg($dur);
+    delete(@off_start[args.next_pid]);
 }}
 
 interval:s:{int(duration)} {{
@@ -375,12 +375,12 @@ interval:s:{int(duration)} {{ exit(); }}
         pid = session.pid
         script = f"""
 tracepoint:sched:sched_switch /args.prev_pid == {pid}/ {{
-    @off_start[tid] = nsecs;
+    @off_start[args.prev_pid] = nsecs;
 }}
 
-tracepoint:sched:sched_switch /args.next_pid == {pid} && @off_start[tid]/ {{
-    $dur = (nsecs - @off_start[tid]) / 1000;
-    delete(@off_start[tid]);
+tracepoint:sched:sched_switch /args.next_pid == {pid} && @off_start[args.next_pid]/ {{
+    $dur = (nsecs - @off_start[args.next_pid]) / 1000;
+    delete(@off_start[args.next_pid]);
     if ($dur >= {min_us}) {{
         @stacks[ustack()] = sum($dur);
     }}

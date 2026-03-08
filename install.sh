@@ -40,8 +40,12 @@ setup_sudoers() {
 
     if [[ "$(uname)" == "Darwin" ]]; then
         group="staff"
-    else
+    elif getent group sudo &>/dev/null; then
         group="sudo"
+    elif getent group wheel &>/dev/null; then
+        group="wheel"
+    else
+        group="$(id -gn)"
     fi
 
     echo ""
