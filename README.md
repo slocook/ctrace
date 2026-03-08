@@ -7,20 +7,30 @@ Primary use case: diagnosing tail latency, memory pressure, I/O bottlenecks, and
 ## Install
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/slocook/ctrace/main/install.sh | bash
+```
+
+Or from a local checkout:
+
+```bash
 ./install.sh
 ```
 
 This will:
-1. Install Python dependencies via `uv`
-2. Set up passwordless sudo for dtrace/bpftrace (prompts for approval)
-3. Register ctrace as an MCP server in Claude Code
-4. Install the skill to `~/.claude/skills/ctrace/`
+1. Clone the repo to `~/.local/share/ctrace` (or use existing checkout)
+2. Install Python dependencies via `uv`
+3. Set up passwordless sudo for dtrace/bpftrace (prompts for approval)
+4. Register ctrace as an MCP server in Claude Code
+5. Install the skill to `~/.claude/skills/ctrace/`
+
+Set `CTRACE_HOME` to customize the install location.
 
 ### Manual setup
 
 ```bash
-uv sync
-claude mcp add --scope user ctrace -- uv run --directory ~/workspace/ctrace ctrace-mcp
+git clone https://github.com/slocook/ctrace.git ~/.local/share/ctrace
+cd ~/.local/share/ctrace && uv sync
+claude mcp add --scope user ctrace -- uv run --directory ~/.local/share/ctrace ctrace-mcp
 ```
 
 ## Tools (21)

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_URL="https://github.com/slocook/ctrace.git"
+INSTALL_DIR="${CTRACE_HOME:-$HOME/.local/share/ctrace}"
 
 echo "=== ctrace installer ==="
 echo ""
@@ -12,10 +13,24 @@ if ! command -v uv &>/dev/null; then
     exit 1
 fi
 
+# If running from a checkout, use that directory; otherwise clone
+if [ -f "$(dirname "$0")/SKILL.md" ] 2>/dev/null; then
+  CTRACE_DIR="$(cd "$(dirname "$0")" && pwd)"
+else
+  # curl | bash mode — clone the repo
+  if [ -d "$INSTALL_DIR/.git" ]; then
+    echo "Updating existing installation at $INSTALL_DIR"
+    git -C "$INSTALL_DIR" pull --ff-only
+  else
+    echo "Cloning ctrace to $INSTALL_DIR"
+    git clone "$REPO_URL" "$INSTALL_DIR"
+  fi
+  CTRACE_DIR="$INSTALL_DIR"
+fi
+
 # Install dependencies
 echo "Installing ctrace with uv..."
-cd "$SCRIPT_DIR"
-uv sync
+uv sync --directory "$CTRACE_DIR"
 
 # Platform-specific sudoers setup
 setup_sudoers() {
@@ -60,12 +75,12 @@ fi
 
 # Register MCP server (user scope = available in all projects)
 claude mcp add --scope user ctrace -- \
-  uv run --directory "$SCRIPT_DIR" ctrace-mcp
+  uv run --directory "$CTRACE_DIR" ctrace-mcp
 
 # Install skill
 SKILL_DIR="$HOME/.claude/skills/ctrace"
 mkdir -p "$SKILL_DIR"
-cp "$SCRIPT_DIR/SKILL.md" "$SKILL_DIR/SKILL.md"
+cp "$CTRACE_DIR/SKILL.md" "$SKILL_DIR/SKILL.md"
 
 echo ""
 echo "Done. ctrace MCP server registered and skill installed."
