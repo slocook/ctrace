@@ -414,9 +414,20 @@ interval:s:{int(duration)} {{
             raise ValueError(f"Tick '{tick_name}' not defined.")
         tick = session.ticks[tick_name]
         binary = session.binary_path or ""
+        libc = self._get_libc()
         script = f"""
 uprobe:{binary}:{tick.function} /pid == {pid}/ {{
     @tick_start[tid] = nsecs;
+    @tick_sc[tid] = 0;
+    @tick_alloc_n[tid] = 0;
+}}
+
+tracepoint:syscalls:sys_enter_* /pid == {pid} && @tick_start[tid]/ {{
+    @tick_sc[tid]++;
+}}
+
+uprobe:{libc}:malloc /pid == {pid} && @tick_start[tid]/ {{
+    @tick_alloc_n[tid]++;
 }}
 
 uretprobe:{binary}:{tick.function} /pid == {pid} && @tick_start[tid]/ {{
@@ -427,7 +438,11 @@ uretprobe:{binary}:{tick.function} /pid == {pid} && @tick_start[tid]/ {{
     @min_d = min($dur);
     @max_d = max($dur);
     @avg_d = avg($dur);
+    @avg_syscalls = avg(@tick_sc[tid]);
+    @avg_allocs = avg(@tick_alloc_n[tid]);
     delete(@tick_start[tid]);
+    delete(@tick_sc[tid]);
+    delete(@tick_alloc_n[tid]);
 }}
 
 interval:s:{int(duration)} {{
@@ -436,14 +451,30 @@ interval:s:{int(duration)} {{
     print(@min_d);
     print(@max_d);
     print(@avg_d);
+    print(@avg_syscalls);
+    print(@avg_allocs);
     print(@durations);
     exit();
 }}
 """
         output = await self.run_script(script, duration + 2)
+        stats: dict = {}
+        for line in output.splitlines():
+            for key, field in [
+                ("@count:", "tick_count"), ("@total:", "total_us"),
+                ("@min_d:", "min_us"), ("@max_d:", "max_us"), ("@avg_d:", "avg_us"),
+                ("@avg_syscalls:", "avg_syscalls"), ("@avg_allocs:", "avg_allocs"),
+            ]:
+                if line.startswith(key):
+                    try:
+                        stats[field] = int(line.split(":", 1)[1].strip())
+                    except ValueError:
+                        pass
         return self._wrap(
             tool="ctrace_tick_summary", session_id=session.session_id, pid=pid,
-            duration_s=duration, raw_output=output[:4000],
+            duration_s=duration,
+            aggregates={"tick_stats": stats} if stats else None,
+            raw_output=output[:4000],
         )
 
     async def tick_outliers(self, session_id: str | None, tick_name: str, duration: float, threshold_us: int) -> dict:
