@@ -141,7 +141,6 @@ class Backend(ABC):
         warnings: list[str] | None = None,
         errors: list[str] | None = None,
         capabilities: Capabilities | None = None,
-        legacy: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build a trace envelope for a tool response."""
         return build_envelope(
@@ -156,7 +155,6 @@ class Backend(ABC):
             raw_output=raw_output,
             warnings=warnings,
             errors=errors,
-            legacy=legacy,
         )
 
     @abstractmethod

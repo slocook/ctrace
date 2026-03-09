@@ -127,7 +127,6 @@ class DTraceBackend(Backend):
                 has_tid=False,
                 timing_source="derived",
             ),
-            legacy={"error": error_msg, "sip_enabled": True},
         )
 
     async def _run_fs_usage(self, pid: int, duration: float, filter_mode: str | None = None) -> str:
@@ -299,7 +298,6 @@ class DTraceBackend(Backend):
                 duration_s=duration,
                 capabilities=self._fs_usage_capabilities(),
                 aggregates=agg,
-                legacy={"pid": pid, "duration_s": duration, **summary},
             )
 
         script = f"""
@@ -327,7 +325,6 @@ tick-1s /secs >= {int(duration)}/ {{ exit(0); }}
             capabilities=self._dtrace_capabilities(),
             aggregates={"syscall_by_name": top},
             raw_output=output[:4000],
-            legacy={"pid": pid, "duration_s": duration, "syscalls": top, "raw_output": output[:4000]},
         )
 
     async def syscall_trace(self, session_id: str | None, duration: float, syscalls: list[str] | None, min_latency_us: int) -> dict:
@@ -351,14 +348,10 @@ tick-1s /secs >= {int(duration)}/ {{ exit(0); }}
                 )
                 for e in filtered[:500]
             ]
-            legacy = {
-                "pid": pid, "duration_s": duration, "min_latency_us": min_latency_us,
-                "events": filtered[:500], "total_captured": len(filtered),
-            }
             return self._wrap(
                 tool="ctrace_syscall_trace", session_id=session.session_id, pid=pid,
                 duration_s=duration, capabilities=self._fs_usage_capabilities(),
-                events=trace_events, legacy=legacy,
+                events=trace_events,
             )
 
         syscall_filter = ""
@@ -392,14 +385,10 @@ tick-1s /secs >= {int(duration)}/ {{ exit(0); }}
             )
             for e in cleaned[:500]
         ]
-        legacy = {
-            "pid": pid, "duration_s": duration, "min_latency_us": min_latency_us,
-            "events": cleaned[:500], "total_captured": len(cleaned),
-        }
         return self._wrap(
             tool="ctrace_syscall_trace", session_id=session.session_id, pid=pid,
             duration_s=duration, capabilities=self._dtrace_capabilities(),
-            events=trace_events, legacy=legacy,
+            events=trace_events,
         )
 
     # ---- Memory Analysis ----
@@ -435,11 +424,6 @@ tick-1s /secs >= {int(duration)}/ {{
                         m = re.search(r'(\d+)', line.split(key)[-1])
                         if m:
                             summary[key] = int(m.group(1))
-            legacy = {
-                "pid": pid, "duration_s": duration,
-                "note": "SIP enabled — showing memory region allocations (not individual malloc calls)",
-                "summary": summary, "raw_output": output[:4000],
-            }
             return self._wrap(
                 tool="ctrace_alloc_summary", session_id=session.session_id, pid=pid,
                 duration_s=duration, aggregates={"alloc_stats": summary},
@@ -449,7 +433,6 @@ tick-1s /secs >= {int(duration)}/ {{
                     has_retval=False, has_tid=False, timing_source="derived",
                 ),
                 warnings=["SIP enabled — showing memory region allocations (not individual malloc calls)"],
-                legacy=legacy,
             )
 
         script = f"""
@@ -477,11 +460,10 @@ tick-1s /secs >= {int(duration)}/ {{
                     m = re.search(r'(\d+)', line.split(key)[-1])
                     if m:
                         summary[key] = int(m.group(1))
-        legacy = {"pid": pid, "duration_s": duration, "summary": summary, "raw_output": output[:4000]}
         return self._wrap(
             tool="ctrace_alloc_summary", session_id=session.session_id, pid=pid,
             duration_s=duration, capabilities=self._dtrace_capabilities(),
-            aggregates={"alloc_stats": summary}, raw_output=output[:4000], legacy=legacy,
+            aggregates={"alloc_stats": summary}, raw_output=output[:4000],
         )
 
     async def alloc_hotspots(self, session_id: str | None, duration: float, top_n: int) -> dict:
@@ -501,12 +483,11 @@ tick-1s /secs >= {int(duration)}/ {{
 }}
 """
         output = await self._run_inline(script, duration + 2)
-        legacy = {"pid": pid, "duration_s": duration, "raw_output": output[:8000]}
         caps = self._dtrace_capabilities()
         caps["has_user_stacks"] = True
         return self._wrap(
             tool="ctrace_alloc_hotspots", session_id=session.session_id, pid=pid,
-            duration_s=duration, capabilities=caps, raw_output=output[:8000], legacy=legacy,
+            duration_s=duration, capabilities=caps, raw_output=output[:8000],
         )
 
     # ---- I/O Analysis ----
@@ -531,7 +512,6 @@ tick-1s /secs >= {int(duration)}/ {{
             for v in fd_stats.values():
                 v["syscalls"] = dict(v["syscalls"])
             io_by_fd = sorted(fd_stats.values(), key=lambda x: -x["ops"])
-            legacy = {"pid": pid, "duration_s": duration, "io_by_fd": io_by_fd, "total_events": len(fs_events)}
             trace_events = [
                 TraceEvent(
                     ts_ns=None, category="io", name=e["syscall"], phase="complete",
@@ -543,7 +523,7 @@ tick-1s /secs >= {int(duration)}/ {{
             return self._wrap(
                 tool="ctrace_io_summary", session_id=session.session_id, pid=pid,
                 duration_s=duration, capabilities=self._fs_usage_capabilities(),
-                events=trace_events, aggregates={"io_by_fd": io_by_fd}, legacy=legacy,
+                events=trace_events, aggregates={"io_by_fd": io_by_fd},
             )
 
         script = f"""
@@ -587,11 +567,10 @@ tick-1s /secs >= {int(duration)}/ {{
                     except ValueError:
                         io_data[key][k] = v
         io_ops = list(io_data.values())
-        legacy = {"pid": pid, "duration_s": duration, "io_operations": io_ops, "raw_output": output[:4000]}
         return self._wrap(
             tool="ctrace_io_summary", session_id=session.session_id, pid=pid,
             duration_s=duration, capabilities=self._dtrace_capabilities(),
-            aggregates={"io_by_fd": io_ops}, raw_output=output[:4000], legacy=legacy,
+            aggregates={"io_by_fd": io_ops}, raw_output=output[:4000],
         )
 
     async def io_latency(self, session_id: str | None, duration: float, threshold_us: int) -> dict:
@@ -610,14 +589,10 @@ tick-1s /secs >= {int(duration)}/ {{
                 )
                 for e in slow[:500]
             ]
-            legacy = {
-                "pid": pid, "duration_s": duration, "threshold_us": threshold_us,
-                "slow_ops": slow[:500], "total_captured": len(slow),
-            }
             return self._wrap(
                 tool="ctrace_io_latency", session_id=session.session_id, pid=pid,
                 duration_s=duration, capabilities=self._fs_usage_capabilities(),
-                events=trace_events, legacy=legacy,
+                events=trace_events,
             )
 
         script = f"""
@@ -652,11 +627,10 @@ tick-1s /secs >= {int(duration)}/ {{ exit(0); }}
             )
             for e in parsed_events[:500]
         ]
-        legacy = {"pid": pid, "duration_s": duration, "threshold_us": threshold_us, "slow_ops": parsed_events[:500], "total_captured": len(parsed_events)}
         return self._wrap(
             tool="ctrace_io_latency", session_id=session.session_id, pid=pid,
             duration_s=duration, capabilities=self._dtrace_capabilities(),
-            events=trace_events, legacy=legacy,
+            events=trace_events,
         )
 
     # ---- Scheduling & Concurrency ----
@@ -694,11 +668,10 @@ tick-1s /secs >= {int(duration)}/ {{
                             threads[tid] = {"tid": tid}
                         threads[tid][field] = int(parts[2])
         thread_list = list(threads.values())
-        legacy = {"pid": pid, "duration_s": duration, "threads": thread_list, "raw_output": output[:4000]}
         return self._wrap(
             tool="ctrace_sched_summary", session_id=session.session_id, pid=pid,
             duration_s=duration, capabilities=self._dtrace_capabilities(),
-            aggregates={"threads": thread_list}, raw_output=output[:4000], legacy=legacy,
+            aggregates={"threads": thread_list}, raw_output=output[:4000],
         )
 
     async def lock_contention(self, session_id: str | None, duration: float, threshold_us: int) -> dict:
@@ -732,11 +705,10 @@ tick-1s /secs >= {int(duration)}/ {{ exit(0); }}
             )
             for e in events[:500]
         ]
-        legacy = {"pid": pid, "duration_s": duration, "threshold_us": threshold_us, "contention_events": events[:500], "raw_output": output[:4000]}
         return self._wrap(
             tool="ctrace_lock_contention", session_id=session.session_id, pid=pid,
             duration_s=duration, capabilities=self._dtrace_capabilities(),
-            events=trace_events, raw_output=output[:4000], legacy=legacy,
+            events=trace_events, raw_output=output[:4000],
         )
 
     async def offcpu(self, session_id: str | None, duration: float, min_us: int) -> dict:
@@ -756,10 +728,9 @@ tick-1s /secs >= {int(duration)}/ {{ printa(@stacks); exit(0); }}
         output = await self._run_inline(script, duration + 2)
         caps = self._dtrace_capabilities()
         caps["has_user_stacks"] = True
-        legacy = {"pid": pid, "duration_s": duration, "min_us": min_us, "raw_output": output[:8000]}
         return self._wrap(
             tool="ctrace_offcpu", session_id=session.session_id, pid=pid,
-            duration_s=duration, capabilities=caps, raw_output=output[:8000], legacy=legacy,
+            duration_s=duration, capabilities=caps, raw_output=output[:8000],
         )
 
     # ---- Tick/Frame Analysis ----
@@ -801,11 +772,10 @@ tick-1s /secs >= {int(duration)}/ {{
                     m = re.search(r'(-?\d+)', line.split(key)[-1])
                     if m:
                         stats[key] = int(m.group(1))
-        legacy = {"pid": pid, "tick": tick_name, "function": func, "duration_s": duration, "stats": stats, "raw_output": output[:4000]}
         return self._wrap(
             tool="ctrace_tick_summary", session_id=session.session_id, pid=pid,
             duration_s=duration, capabilities=self._dtrace_capabilities(),
-            aggregates={"tick_stats": stats}, raw_output=output[:4000], legacy=legacy,
+            aggregates={"tick_stats": stats}, raw_output=output[:4000],
         )
 
     async def tick_outliers(self, session_id: str | None, tick_name: str, duration: float, threshold_us: int) -> dict:
@@ -849,11 +819,10 @@ tick-1s /secs >= {int(duration)}/ {{
             )
             for o in outliers[:200]
         ]
-        legacy = {"pid": pid, "tick": tick_name, "function": func, "threshold_us": threshold_us, "duration_s": duration, "outliers": outliers[:200], "total_outliers": len(outliers), "raw_output": output[:4000]}
         return self._wrap(
             tool="ctrace_tick_outliers", session_id=session.session_id, pid=pid,
             duration_s=duration, capabilities=self._dtrace_capabilities(),
-            events=trace_events, raw_output=output[:4000], legacy=legacy,
+            events=trace_events, raw_output=output[:4000],
         )
 
     async def tick_compare(self, session_id: str | None, tick_name: str, duration: float) -> dict:
@@ -885,11 +854,10 @@ tick-1s /secs >= {int(duration)}/ {{ exit(0); }}
                 if len(parts) >= 4:
                     ticks.append({"duration_us": int(parts[1]), "syscalls": int(parts[2]), "allocs": int(parts[3])})
         if not ticks:
-            legacy = {"pid": pid, "tick": tick_name, "error": "No ticks captured", "raw_output": output[:4000]}
             return self._wrap(
                 tool="ctrace_tick_compare", session_id=session.session_id, pid=pid,
                 duration_s=duration, capabilities=self._dtrace_capabilities(),
-                errors=["No ticks captured"], raw_output=output[:4000], legacy=legacy,
+                errors=["No ticks captured"], raw_output=output[:4000],
             )
         ticks.sort(key=lambda t: t["duration_us"])
         n = len(ticks)
@@ -908,11 +876,10 @@ tick-1s /secs >= {int(duration)}/ {{ exit(0); }}
             "p99_duration_us": ticks[p99_idx]["duration_us"],
             "fast_ticks_p50": avg_stats(fast), "slow_ticks_p99": avg_stats(slow),
         }
-        legacy = {"pid": pid, "tick": tick_name, "function": func, "duration_s": duration, **comparison}
         return self._wrap(
             tool="ctrace_tick_compare", session_id=session.session_id, pid=pid,
             duration_s=duration, capabilities=self._dtrace_capabilities(),
-            aggregates={"tick_comparison": comparison}, legacy=legacy,
+            aggregates={"tick_comparison": comparison},
         )
 
     # ---- General ----
@@ -922,11 +889,10 @@ tick-1s /secs >= {int(duration)}/ {{ exit(0); }}
         pid = session.pid
         script = script.replace("$target", str(pid))
         output = await self._run_inline(script, duration + 2)
-        legacy = {"pid": pid, "duration_s": duration, "output": output[:8000]}
         return self._wrap(
             tool="ctrace_probe", session_id=session.session_id, pid=pid,
             duration_s=duration, capabilities=self._dtrace_capabilities(),
-            raw_output=output[:8000], legacy=legacy,
+            raw_output=output[:8000],
         )
 
     async def snapshot(self, session_id: str | None, duration: float) -> dict:
@@ -953,18 +919,11 @@ tick-1s /secs >= {int(duration)}/ {{
             fs_events = self._parse_fs_usage(fs_output)
             syscall_summary = self._summarize_fs_usage(fs_events, 10)
             status = session.status_info()
-            legacy = {
-                "pid": pid, "duration_s": duration,
-                "process_status": status,
-                "ticks_defined": list(session.ticks.keys()),
-                **syscall_summary,
-                "dtrace_output": dtrace_output[:3000],
-            }
             return self._wrap(
                 tool="ctrace_snapshot", session_id=session.session_id, pid=pid,
                 duration_s=duration, capabilities=self._fs_usage_capabilities(),
                 aggregates={"syscall_summary": syscall_summary},
-                raw_output=dtrace_output[:3000], legacy=legacy,
+                raw_output=dtrace_output[:3000],
             )
 
         tick_probes = ""
@@ -995,10 +954,8 @@ tick-1s /secs >= {int(duration)}/ {{
 }}
 """
         output = await self._run_inline(script, duration + 2)
-        status = session.status_info()
-        legacy = {"pid": pid, "duration_s": duration, "process_status": status, "ticks_defined": list(session.ticks.keys()), "raw_output": output[:6000]}
         return self._wrap(
             tool="ctrace_snapshot", session_id=session.session_id, pid=pid,
             duration_s=duration, capabilities=self._dtrace_capabilities(),
-            raw_output=output[:6000], legacy=legacy,
+            raw_output=output[:6000],
         )

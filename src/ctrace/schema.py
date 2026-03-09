@@ -63,21 +63,12 @@ def build_envelope(
     raw_output: str | None = None,
     warnings: list[str] | None = None,
     errors: list[str] | None = None,
-    legacy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a trace envelope dict with consistent metadata.
-
-    Legacy keys are merged at the top level for backward compatibility,
-    but envelope keys take precedence if there's a collision.
-    """
+    """Build a trace envelope dict with consistent metadata."""
     end_ns = time.time_ns()
     start_ns = end_ns - int(duration_s * 1_000_000_000)
 
     envelope: dict[str, Any] = {}
-
-    # Merge legacy keys first so envelope keys take precedence
-    if legacy:
-        envelope.update(legacy)
 
     envelope["schema_version"] = "1.0"
     envelope["backend"] = backend
