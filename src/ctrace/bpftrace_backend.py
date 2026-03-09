@@ -97,16 +97,22 @@ interval:s:{int(duration)} {{
     async def syscall_trace(self, session_id: str | None, duration: float, syscalls: list[str] | None, min_latency_us: int) -> dict:
         session = self.sessions.get_default(session_id)
         pid = session.pid
+        if syscalls:
+            entry_probes = ",\n".join(f"tracepoint:syscalls:sys_enter_{s}" for s in syscalls)
+            exit_probes = ",\n".join(f"tracepoint:syscalls:sys_exit_{s}" for s in syscalls)
+        else:
+            entry_probes = "tracepoint:syscalls:sys_enter_*"
+            exit_probes = "tracepoint:syscalls:sys_exit_*"
         script = f"""
-tracepoint:raw_syscalls:sys_enter /pid == {pid}/ {{
+{entry_probes} /pid == {pid}/ {{
     @start[tid] = nsecs;
 }}
 
-tracepoint:raw_syscalls:sys_exit /pid == {pid} && @start[tid]/ {{
+{exit_probes} /pid == {pid} && @start[tid]/ {{
     $dur = (nsecs - @start[tid]) / 1000;
     delete(@start[tid]);
     if ($dur >= {min_latency_us}) {{
-        printf("TRACE|%s|%d|%d\\n", probe, args.id, $dur);
+        printf("TRACE|%s|%d\\n", probe, $dur);
     }}
 }}
 
@@ -117,17 +123,18 @@ interval:s:{int(duration)} {{ exit(); }}
         for line in output.splitlines():
             if line.startswith("TRACE|"):
                 parts = line.split("|")
-                if len(parts) >= 4:
+                if len(parts) >= 3:
+                    probe_name = parts[1]
+                    syscall_name = probe_name.split("sys_exit_")[-1] if "sys_exit_" in probe_name else probe_name
                     events.append({
-                        "probe": parts[1],
-                        "syscall_nr": parts[2],
-                        "latency_us": int(parts[3]),
+                        "syscall": syscall_name,
+                        "probe": probe_name,
+                        "latency_us": int(parts[2]),
                     })
         trace_events = [
             TraceEvent(
-                ts_ns=None, category="syscall", name=e.get("probe", ""), phase="complete",
+                ts_ns=None, category="syscall", name=e["syscall"], phase="complete",
                 duration_us=e["latency_us"], status="ok",
-                fields={"syscall_nr": e["syscall_nr"]},
             )
             for e in events[:500]
         ]
@@ -306,12 +313,18 @@ interval:s:{int(duration)} {{ exit(); }}
         session = self.sessions.get_default(session_id)
         pid = session.pid
         script = f"""
-tracepoint:sched:sched_switch /args.prev_pid == {pid}/ {{
+BEGIN {{ @tids[{pid}] = 1; }}
+
+tracepoint:syscalls:sys_enter_* /pid == {pid}/ {{
+    @tids[tid] = 1;
+}}
+
+tracepoint:sched:sched_switch /@tids[args.prev_pid]/ {{
     @off_start[args.prev_pid] = nsecs;
     @ctx_switches[args.prev_pid] = count();
 }}
 
-tracepoint:sched:sched_switch /args.next_pid == {pid} && @off_start[args.next_pid]/ {{
+tracepoint:sched:sched_switch /@tids[args.next_pid] && @off_start[args.next_pid]/ {{
     $dur = (nsecs - @off_start[args.next_pid]) / 1000;
     @off_cpu[args.next_pid] = sum($dur);
     @wakeup_lat[args.next_pid] = avg($dur);
@@ -374,11 +387,17 @@ interval:s:{int(duration)} {{ exit(); }}
         session = self.sessions.get_default(session_id)
         pid = session.pid
         script = f"""
-tracepoint:sched:sched_switch /args.prev_pid == {pid}/ {{
+BEGIN {{ @tids[{pid}] = 1; }}
+
+tracepoint:syscalls:sys_enter_* /pid == {pid}/ {{
+    @tids[tid] = 1;
+}}
+
+tracepoint:sched:sched_switch /@tids[args.prev_pid]/ {{
     @off_start[args.prev_pid] = nsecs;
 }}
 
-tracepoint:sched:sched_switch /args.next_pid == {pid} && @off_start[args.next_pid]/ {{
+tracepoint:sched:sched_switch /@tids[args.next_pid] && @off_start[args.next_pid]/ {{
     $dur = (nsecs - @off_start[args.next_pid]) / 1000;
     delete(@off_start[args.next_pid]);
     if ($dur >= {min_us}) {{
@@ -447,19 +466,35 @@ interval:s:{int(duration)} {{
             raise ValueError(f"Tick '{tick_name}' not defined.")
         tick = session.ticks[tick_name]
         binary = session.binary_path or ""
+        libc = self._get_libc()
         script = f"""
 uprobe:{binary}:{tick.function} /pid == {pid}/ {{
     @tick_start[tid] = nsecs;
+    @tick_sc[tid] = 0;
+    @tick_alloc_n[tid] = 0;
+    @tick_alloc_b[tid] = 0;
+}}
+
+tracepoint:syscalls:sys_enter_* /pid == {pid} && @tick_start[tid]/ {{
+    @tick_sc[tid]++;
+}}
+
+uprobe:{libc}:malloc /pid == {pid} && @tick_start[tid]/ {{
+    @tick_alloc_n[tid]++;
+    @tick_alloc_b[tid] += arg0;
 }}
 
 uretprobe:{binary}:{tick.function} /pid == {pid} && @tick_start[tid]/ {{
     $dur = (nsecs - @tick_start[tid]) / 1000;
-    delete(@tick_start[tid]);
     @total_ticks = count();
     if ($dur >= {threshold_us}) {{
-        printf("OUTLIER|%d\\n", $dur);
+        printf("OUTLIER|%d|%d|%d|%d\\n", $dur, @tick_sc[tid], @tick_alloc_n[tid], @tick_alloc_b[tid]);
         @outlier_count = count();
     }}
+    delete(@tick_start[tid]);
+    delete(@tick_sc[tid]);
+    delete(@tick_alloc_n[tid]);
+    delete(@tick_alloc_b[tid]);
 }}
 
 interval:s:{int(duration)} {{
@@ -473,16 +508,25 @@ interval:s:{int(duration)} {{
         for line in output.splitlines():
             if line.startswith("OUTLIER|"):
                 parts = line.split("|")
-                if len(parts) >= 2:
-                    outliers.append({"duration_us": int(parts[1])})
+                if len(parts) >= 5:
+                    outliers.append({
+                        "duration_us": int(parts[1]),
+                        "syscall_count": int(parts[2]),
+                        "alloc_count": int(parts[3]),
+                        "alloc_bytes": int(parts[4]),
+                    })
         trace_events = [
             TraceEvent(
                 ts_ns=None, category="tick", name=tick_name, phase="complete",
                 duration_us=o["duration_us"], status="ok", labels=["outlier"],
+                fields={"syscall_count": o["syscall_count"], "alloc_count": o["alloc_count"], "alloc_bytes": o["alloc_bytes"]},
             )
             for o in outliers[:200]
         ]
-        legacy = {"pid": pid, "tick": tick_name, "threshold_us": threshold_us, "duration_s": duration, "outliers": outliers[:200]}
+        legacy = {
+            "pid": pid, "tick": tick_name, "threshold_us": threshold_us,
+            "duration_s": duration, "outliers": outliers[:200], "total_outliers": len(outliers),
+        }
         return self._wrap(
             tool="ctrace_tick_outliers", session_id=session.session_id, pid=pid,
             duration_s=duration, events=trace_events, legacy=legacy,
