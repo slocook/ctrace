@@ -8,8 +8,7 @@ fs_usage (per-syscall tracing), profile sampling, and the magmalloc provider.
 from __future__ import annotations
 
 import asyncio
-import ctypes
-import ctypes.util
+import json
 import re
 import signal
 import subprocess
@@ -968,71 +967,95 @@ tick-1s /secs >= {int(duration)}/ {{
     # ---- macOS thread name lookup ----
 
     def threads(self, session_id: str | None) -> dict:
-        """Override to add macOS thread names via libproc proc_pidinfo."""
-        result = super().threads(session_id)
-        names = self._macos_thread_names(result["pid"])
-        if names:
-            for t in result["threads"]:
-                if t["tid"] in names:
-                    t["name"] = names[t["tid"]]
-        return result
+        """List threads using libproc proc_pidinfo via sudo.
 
-    def _macos_thread_names(self, pid: int) -> dict[int, str]:
-        """Return {tid: name} for all named threads of pid using libproc."""
-        try:
-            libpath = ctypes.util.find_library("c")
-            if not libpath:
-                return {}
-            libc = ctypes.CDLL(libpath, use_errno=True)
-            proc_pidinfo = libc.proc_pidinfo
-            proc_pidinfo.restype = ctypes.c_int
-            proc_pidinfo.argtypes = [
-                ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
-                ctypes.c_void_p, ctypes.c_int,
-            ]
+        On macOS, psutil.Process.threads() and libproc proc_pidinfo both
+        require task_for_pid privileges. We shell out to sudo python3 to
+        run the query (sudo is already configured for dtrace).
+        """
+        session = self.sessions.get_default(session_id)
+        pid = session.pid
+        return self._macos_threads_via_sudo(pid)
 
-            PROC_PIDLISTTHREADS = 6   # from <sys/proc_info.h>; size per entry = 2*sizeof(uint32_t)
-            PROC_PIDTHREADINFO = 5
-            MAXTHREADNAMESIZE = 64
+    @staticmethod
+    def _macos_threads_via_sudo(pid: int) -> dict:
+        """Return thread list for *pid* using proc_pidinfo via sudo."""
+        helper = _MACOS_THREAD_HELPER.replace("TARGET_PID", str(pid))
+        result = subprocess.run(
+            ["sudo", "-n", "python3", "-c", helper],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            raise ValueError(
+                f"Cannot list threads for pid {pid}: {result.stderr.strip()}"
+            )
+        thread_list = json.loads(result.stdout)
+        return {
+            "pid": pid,
+            "thread_count": len(thread_list),
+            "threads": thread_list,
+        }
 
-            buf_size = proc_pidinfo(pid, PROC_PIDLISTTHREADS, 0, None, 0)
-            if buf_size <= 0:
-                return {}
 
-            num_threads = buf_size // 8  # sizeof(uint64_t)
-            ThreadArray = ctypes.c_uint64 * num_threads
-            thread_buf = ThreadArray()
-            actual_size = proc_pidinfo(pid, PROC_PIDLISTTHREADS, 0, thread_buf, buf_size)
-            actual_threads = actual_size // 8
+# Inline Python script executed via sudo to list threads using libproc.
+# Uses three proc_pidinfo flavors:
+#   4  (PROC_PIDTASKINFO)       — get thread count
+#   28 (PROC_PIDLISTTHREADIDS)  — get real thread IDs (matches dtrace tid)
+#   6  (PROC_PIDLISTTHREADS)    — get thread handles (Mach port names)
+#   5  (PROC_PIDTHREADINFO)     — per-thread name + CPU times (keyed by handle)
+_MACOS_THREAD_HELPER = '''
+import ctypes, ctypes.util, json, sys
 
-            # struct proc_threadinfo from <sys/proc_info.h>
-            class ProcThreadInfo(ctypes.Structure):
-                _fields_ = [
-                    ("pth_user_time",   ctypes.c_uint64),
-                    ("pth_system_time", ctypes.c_uint64),
-                    ("pth_cpu_usage",   ctypes.c_int32),
-                    ("pth_policy",      ctypes.c_int32),
-                    ("pth_run_state",   ctypes.c_int32),
-                    ("pth_flags",       ctypes.c_int32),
-                    ("pth_sleep_time",  ctypes.c_int32),
-                    ("pth_curpri",      ctypes.c_int32),
-                    ("pth_priority",    ctypes.c_int32),
-                    ("pth_maxpriority", ctypes.c_int32),
-                    ("pth_name",        ctypes.c_char * MAXTHREADNAMESIZE),
-                ]
+pid = TARGET_PID
+libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+f = libc.proc_pidinfo
+f.restype = ctypes.c_int
+f.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
 
-            names: dict[int, str] = {}
-            for i in range(actual_threads):
-                tid = int(thread_buf[i])
-                info = ProcThreadInfo()
-                rc = proc_pidinfo(
-                    pid, PROC_PIDTHREADINFO, tid,
-                    ctypes.byref(info), ctypes.sizeof(info),
-                )
-                if rc > 0 and info.pth_name:
-                    name = info.pth_name.decode("utf-8", errors="replace").rstrip("\x00")
-                    if name:
-                        names[tid] = name
-            return names
-        except Exception:
-            return {}
+class PTI(ctypes.Structure):
+    _fields_ = [
+        ("v", ctypes.c_uint64), ("r", ctypes.c_uint64),
+        ("tu", ctypes.c_uint64), ("ts", ctypes.c_uint64),
+        ("thu", ctypes.c_uint64), ("ths", ctypes.c_uint64),
+        ("pol", ctypes.c_int32), ("flt", ctypes.c_int32),
+        ("pgi", ctypes.c_int32), ("cow", ctypes.c_int32),
+        ("ms", ctypes.c_int32), ("mr", ctypes.c_int32),
+        ("sm", ctypes.c_int32), ("su", ctypes.c_int32),
+        ("csw", ctypes.c_int32), ("threadnum", ctypes.c_int32),
+        ("running", ctypes.c_int32), ("pri", ctypes.c_int32),
+    ]
+
+ti = PTI()
+if f(pid, 4, 0, ctypes.byref(ti), ctypes.sizeof(ti)) <= 0:
+    print("[]"); sys.exit(0)
+n = ti.threadnum
+
+tids = (ctypes.c_uint64 * (n * 2))()
+n_tids = f(pid, 28, 0, tids, n * 2 * 8) // 8
+
+handles = (ctypes.c_uint64 * (n * 2))()
+n_handles = f(pid, 6, 0, handles, n * 2 * 8) // 8
+
+class T(ctypes.Structure):
+    _fields_ = [
+        ("user", ctypes.c_uint64), ("sys", ctypes.c_uint64),
+        ("cpu", ctypes.c_int32), ("pol", ctypes.c_int32),
+        ("run", ctypes.c_int32), ("flg", ctypes.c_int32),
+        ("slp", ctypes.c_int32), ("cur", ctypes.c_int32),
+        ("pri", ctypes.c_int32), ("max", ctypes.c_int32),
+        ("name", ctypes.c_char * 64),
+    ]
+
+out = []
+for i in range(min(n_tids, n_handles)):
+    handle = int(handles[i])
+    info = T()
+    rc = f(pid, 5, handle, ctypes.byref(info), ctypes.sizeof(info))
+    if rc > 0:
+        nm = info.name.decode("utf-8", errors="replace").rstrip("\\x00")
+        entry = {"tid": int(tids[i]), "user_time_s": round(info.user / 1e9, 3), "system_time_s": round(info.sys / 1e9, 3)}
+        if nm:
+            entry["name"] = nm
+        out.append(entry)
+print(json.dumps(out))
+'''

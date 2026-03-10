@@ -4,13 +4,44 @@
 // Build: clang++ -O1 -g -o test_target tests/test_target.cpp
 // Run:   ./test_target
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <pthread.h>
 #include <thread>
 #include <vector>
 #include <unistd.h>
+
+static std::atomic<bool> g_running{true};
+
+// Background worker: does periodic computation
+void worker_thread(const char* name) {
+    pthread_setname_np(name);
+    while (g_running.load()) {
+        volatile double acc = 0.0;
+        for (int i = 0; i < 10000; i++) {
+            acc += (double)i * 0.001;
+        }
+        usleep(20000); // 20ms
+    }
+}
+
+// I/O thread: periodic writes
+void io_thread() {
+    pthread_setname_np("io_worker");
+    while (g_running.load()) {
+        FILE* f = fopen("/dev/null", "w");
+        if (f) {
+            char buf[4096];
+            memset(buf, 'B', sizeof(buf));
+            fwrite(buf, 1, sizeof(buf), f);
+            fclose(f);
+        }
+        usleep(50000); // 50ms
+    }
+}
 
 // The "tick" function that ctrace_define_tick should target
 void control_loop_tick(int iteration) {
@@ -54,6 +85,11 @@ int main() {
     fprintf(stderr, "test_target: PID=%d, starting 100Hz control loop\n", getpid());
     fprintf(stderr, "test_target: will run for 60 seconds\n");
 
+    // Spawn background threads
+    std::thread t1(worker_thread, "compute_1");
+    std::thread t2(worker_thread, "compute_2");
+    std::thread t3(io_thread);
+
     auto start = std::chrono::steady_clock::now();
     int iteration = 0;
 
@@ -78,6 +114,11 @@ int main() {
 
         iteration++;
     }
+
+    g_running.store(false);
+    t1.join();
+    t2.join();
+    t3.join();
 
     fprintf(stderr, "test_target: completed %d iterations\n", iteration);
     return 0;
