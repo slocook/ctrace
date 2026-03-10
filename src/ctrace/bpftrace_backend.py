@@ -10,6 +10,20 @@ from ctrace.backend import Backend
 from ctrace.schema import Capabilities, TraceEvent
 
 
+_HIST_BUCKET_RE = re.compile(
+    r'\[(\d+[KMG]?)(?:,\s*\d+[KMG]?\))?\]\s+(\d+)\s+\|',
+)
+
+_SUFFIX_MULT = {"K": 1024, "M": 1024**2, "G": 1024**3}
+
+
+def _parse_suffixed(s: str) -> int:
+    """Parse a bpftrace value that may have a K/M/G suffix."""
+    if s and s[-1] in _SUFFIX_MULT:
+        return int(s[:-1]) * _SUFFIX_MULT[s[-1]]
+    return int(s)
+
+
 class BpftraceBackend(Backend):
 
     def __init__(self) -> None:
@@ -88,9 +102,25 @@ interval:s:{int(duration)} {{
 }}
 """
         output = await self.run_script(script, duration + 2)
+        counts: dict[str, int] = {}
+        latency: dict[str, int] = {}
+        for line in output.splitlines():
+            m = re.match(r'@counts\[tracepoint:syscalls:sys_enter_(\w+)\]:\s*(\d+)', line)
+            if m:
+                counts[m.group(1)] = int(m.group(2))
+                continue
+            m = re.match(r'@latency\[tracepoint:syscalls:sys_exit_(\w+)\]:\s*(\d+)', line)
+            if m:
+                latency[m.group(1)] = int(m.group(2))
+        syscalls = [
+            {"syscall": name, "count": counts[name], "total_latency_us": latency.get(name, 0)}
+            for name in sorted(counts, key=counts.get, reverse=True)
+        ]
         return self._wrap(
             tool="ctrace_syscall_summary", session_id=session.session_id, pid=pid,
-            duration_s=duration, raw_output=output[:4000],
+            duration_s=duration,
+            aggregates={"syscall_by_name": syscalls} if syscalls else None,
+            raw_output=output[:4000],
         )
 
     async def syscall_trace(self, session_id: str | None, duration: float, syscalls: list[str] | None, min_latency_us: int) -> dict:
@@ -173,9 +203,35 @@ interval:s:{int(duration)} {{
 }}
 """
         output = await self.run_script(script, duration + 2)
+        stats: dict[str, Any] = {}
+        for line in output.splitlines():
+            for key in ["malloc_count", "malloc_bytes", "free_count", "realloc_count", "realloc_bytes"]:
+                if line.startswith(f"@{key}:"):
+                    m = re.search(r'(\d+)', line.split(":", 1)[1])
+                    if m:
+                        stats[key] = int(m.group(1))
+        # Parse the @malloc_sizes histogram into structured buckets.
+        in_hist = False
+        size_dist: list[dict] = []
+        for line in output.splitlines():
+            if line.startswith("@malloc_sizes:"):
+                in_hist = True
+                continue
+            if in_hist:
+                bm = _HIST_BUCKET_RE.search(line)
+                if bm:
+                    count = int(bm.group(2))
+                    if count > 0:
+                        size_dist.append({"min": _parse_suffixed(bm.group(1)), "count": count})
+                elif line.strip() == "" or (line and not line[0].isspace() and "[" not in line):
+                    in_hist = False
+        if size_dist:
+            stats["malloc_size_distribution"] = size_dist
         return self._wrap(
             tool="ctrace_alloc_summary", session_id=session.session_id, pid=pid,
-            duration_s=duration, raw_output=output[:4000],
+            duration_s=duration,
+            aggregates={"alloc_stats": stats} if stats else None,
+            raw_output=output[:4000],
         )
 
     async def alloc_hotspots(self, session_id: str | None, duration: float, top_n: int) -> dict:
@@ -315,6 +371,10 @@ tracepoint:sched:sched_switch /@tids[args.prev_pid]/ {{
     @ctx_switches[args.prev_pid] = count();
 }}
 
+tracepoint:sched:sched_switch /@tids[args.next_pid]/ {{
+    @on_start[args.next_pid] = nsecs;
+}}
+
 tracepoint:sched:sched_switch /@tids[args.next_pid] && @off_start[args.next_pid]/ {{
     $dur = (nsecs - @off_start[args.next_pid]) / 1000;
     @off_cpu[args.next_pid] = sum($dur);
@@ -322,17 +382,40 @@ tracepoint:sched:sched_switch /@tids[args.next_pid] && @off_start[args.next_pid]
     delete(@off_start[args.next_pid]);
 }}
 
+tracepoint:sched:sched_switch /@tids[args.prev_pid] && @on_start[args.prev_pid]/ {{
+    $on = (nsecs - @on_start[args.prev_pid]) / 1000;
+    @on_cpu[args.prev_pid] = sum($on);
+    delete(@on_start[args.prev_pid]);
+}}
+
 interval:s:{int(duration)} {{
     print(@ctx_switches);
+    print(@on_cpu);
     print(@off_cpu);
     print(@wakeup_lat);
     exit();
 }}
 """
         output = await self.run_script(script, duration + 2)
+        threads: dict[int, dict] = {}
+        for line in output.splitlines():
+            for prefix, field in [("@ctx_switches[", "context_switches"),
+                                   ("@on_cpu[", "on_cpu_us"),
+                                   ("@off_cpu[", "off_cpu_us"),
+                                   ("@wakeup_lat[", "avg_wakeup_us")]:
+                if line.startswith(prefix):
+                    m = re.match(r'@\w+\[(\d+)\]:\s*(\d+)', line)
+                    if m:
+                        tid = int(m.group(1))
+                        if tid not in threads:
+                            threads[tid] = {"tid": tid}
+                        threads[tid][field] = int(m.group(2))
+        thread_list = list(threads.values())
         return self._wrap(
             tool="ctrace_sched_summary", session_id=session.session_id, pid=pid,
-            duration_s=duration, raw_output=output[:4000],
+            duration_s=duration,
+            aggregates={"threads": thread_list} if thread_list else None,
+            raw_output=output[:4000],
         )
 
     async def lock_contention(self, session_id: str | None, duration: float, threshold_us: int) -> dict:
