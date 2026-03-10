@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import platform
+import re
 import signal
 import subprocess
 import time
@@ -13,6 +14,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+# Thread names in practice are simple identifiers. Restrict to safe characters
+# so values cannot break bpftrace (`comm == "..."`) or dtrace predicate syntax.
+_THREAD_FILTER_RE = re.compile(r'^[A-Za-z0-9_.\ -]{1,64}$')
 
 from ctrace.schema import Capabilities, TraceEvent, build_envelope
 
@@ -277,6 +282,11 @@ class Backend(ABC):
         return session.status_info()
 
     def define_tick(self, session_id: str | None, name: str, function: str, thread_filter: str | None) -> dict:
+        if thread_filter is not None and not _THREAD_FILTER_RE.match(thread_filter):
+            raise ValueError(
+                f"thread_filter {thread_filter!r} contains invalid characters. "
+                "Only alphanumeric, underscore, hyphen, period, and space are allowed (max 64 chars)."
+            )
         session = self.sessions.get_default(session_id)
         tick = TickDefinition(name=name, function=function, thread_filter=thread_filter)
         session.ticks[name] = tick

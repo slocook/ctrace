@@ -415,8 +415,9 @@ interval:s:{int(duration)} {{
         tick = session.ticks[tick_name]
         binary = session.binary_path or ""
         libc = self._get_libc()
+        thread_pred = f' && comm == "{tick.thread_filter}"' if tick.thread_filter else ""
         script = f"""
-uprobe:{binary}:{tick.function} /pid == {pid}/ {{
+uprobe:{binary}:{tick.function} /pid == {pid}{thread_pred}/ {{
     @tick_start[tid] = nsecs;
     @tick_sc[tid] = 0;
     @tick_alloc_n[tid] = 0;
@@ -485,8 +486,9 @@ interval:s:{int(duration)} {{
         tick = session.ticks[tick_name]
         binary = session.binary_path or ""
         libc = self._get_libc()
+        thread_pred = f' && comm == "{tick.thread_filter}"' if tick.thread_filter else ""
         script = f"""
-uprobe:{binary}:{tick.function} /pid == {pid}/ {{
+uprobe:{binary}:{tick.function} /pid == {pid}{thread_pred}/ {{
     @tick_start[tid] = nsecs;
     @tick_sc[tid] = 0;
     @tick_alloc_n[tid] = 0;
@@ -553,8 +555,9 @@ interval:s:{int(duration)} {{
             raise ValueError(f"Tick '{tick_name}' not defined.")
         tick = session.ticks[tick_name]
         binary = session.binary_path or ""
+        thread_pred = f' && comm == "{tick.thread_filter}"' if tick.thread_filter else ""
         script = f"""
-uprobe:{binary}:{tick.function} /pid == {pid}/ {{
+uprobe:{binary}:{tick.function} /pid == {pid}{thread_pred}/ {{
     @tick_start[tid] = nsecs;
 }}
 

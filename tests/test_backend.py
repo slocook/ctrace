@@ -1,10 +1,18 @@
 """Tests for backend module: Session, SessionManager, and script generation."""
 
+import asyncio
 import os
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, AsyncMock
 
 from ctrace.backend import Session, SessionManager, TickDefinition, get_backend
+from ctrace.bpftrace_backend import BpftraceBackend
+from ctrace.dtrace_backend import DTraceBackend
+
+
+def _attach(b, pid=None):
+    """Create a session on the backend using the current process PID."""
+    b.sessions.create(pid=pid or os.getpid(), binary_path="/bin/test")
 
 
 class TestSession:
@@ -93,6 +101,143 @@ class TestTickDefinition:
     def test_with_filter(self):
         td = TickDefinition(name="render", function="render_frame", thread_filter="RenderThread")
         assert td.thread_filter == "RenderThread"
+
+
+class TestThreadFilterValidation:
+    """define_tick must reject thread_filter values that could inject into tracer scripts."""
+
+    def _backend(self):
+        b = BpftraceBackend()
+        _attach(b)
+        return b
+
+    @pytest.mark.parametrize("name", [
+        "physics",
+        "RenderThread",
+        "audio-io",
+        "worker_1",
+        "Worker 3",
+        "net.recv",
+        "A" * 64,
+    ])
+    def test_valid_thread_filters(self, name):
+        b = self._backend()
+        result = b.define_tick("s1", "tick", "fn", thread_filter=name)
+        assert result["defined"] == "tick"
+
+    @pytest.mark.parametrize("bad", [
+        'physics"',          # breaks string literal in both backends
+        'thread" || 1 == 1', # predicate injection
+        '/etc/passwd',       # dtrace predicate delimiter
+        'a/b',               # dtrace predicate delimiter
+        'thread\x00name',    # null byte
+        '',                  # empty string
+        'A' * 65,            # too long
+        'thread\nname',      # newline
+    ])
+    def test_invalid_thread_filters_rejected(self, bad):
+        b = self._backend()
+        with pytest.raises(ValueError, match="thread_filter"):
+            b.define_tick("s1", "tick", "fn", thread_filter=bad)
+
+    def test_none_filter_accepted(self):
+        b = self._backend()
+        result = b.define_tick("s1", "tick", "fn", thread_filter=None)
+        assert result["defined"] == "tick"
+
+
+class TestThreadFilterScriptGeneration:
+    """Verify thread_filter appears correctly in generated tracer scripts."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_bpftrace_tick_summary_with_filter(self):
+        b = BpftraceBackend()
+        _attach(b)
+        b.define_tick("s1", "tick", "my_func", thread_filter="PhysicsThread")
+        captured = []
+        async def capture(script, *a, **kw):
+            captured.append(script)
+            return ""
+        with patch.object(b, "run_script", side_effect=capture):
+            self._run(b.tick_summary("s1", "tick", 1.0))
+        assert 'comm == "PhysicsThread"' in captured[0]
+
+    def test_bpftrace_tick_summary_without_filter(self):
+        b = BpftraceBackend()
+        _attach(b)
+        b.define_tick("s1", "tick", "my_func", thread_filter=None)
+        captured = []
+        async def capture(script, *a, **kw):
+            captured.append(script)
+            return ""
+        with patch.object(b, "run_script", side_effect=capture):
+            self._run(b.tick_summary("s1", "tick", 1.0))
+        assert "comm ==" not in captured[0]
+
+    def test_bpftrace_tick_outliers_with_filter(self):
+        b = BpftraceBackend()
+        _attach(b)
+        b.define_tick("s1", "tick", "my_func", thread_filter="AudioThread")
+        captured = []
+        async def capture(script, *a, **kw):
+            captured.append(script)
+            return ""
+        with patch.object(b, "run_script", side_effect=capture):
+            self._run(b.tick_outliers("s1", "tick", 1.0, 1000))
+        assert 'comm == "AudioThread"' in captured[0]
+
+    def test_bpftrace_tick_compare_with_filter(self):
+        b = BpftraceBackend()
+        _attach(b)
+        b.define_tick("s1", "tick", "my_func", thread_filter="RenderThread")
+        captured = []
+        async def capture(script, *a, **kw):
+            captured.append(script)
+            return ""
+        with patch.object(b, "run_script", side_effect=capture):
+            self._run(b.tick_compare("s1", "tick", 1.0))
+        assert 'comm == "RenderThread"' in captured[0]
+
+    def test_dtrace_tick_summary_with_filter(self):
+        b = DTraceBackend()
+        b._sip_enabled = False
+        _attach(b)
+        b.define_tick("s1", "tick", "my_func", thread_filter="PhysicsThread")
+        captured = []
+        async def capture(script, *a, **kw):
+            captured.append(script)
+            return ""
+        with patch.object(b, "_run_inline", side_effect=capture):
+            self._run(b.tick_summary("s1", "tick", 1.0))
+        assert 'curthread->t_name == "PhysicsThread"' in captured[0]
+
+    def test_dtrace_tick_outliers_with_filter(self):
+        b = DTraceBackend()
+        b._sip_enabled = False
+        _attach(b)
+        b.define_tick("s1", "tick", "my_func", thread_filter="AudioThread")
+        captured = []
+        async def capture(script, *a, **kw):
+            captured.append(script)
+            return ""
+        with patch.object(b, "_run_inline", side_effect=capture):
+            self._run(b.tick_outliers("s1", "tick", 1.0, 1000))
+        assert 'curthread->t_name == "AudioThread"' in captured[0]
+
+    def test_dtrace_tick_compare_with_filter(self):
+        b = DTraceBackend()
+        b._sip_enabled = False
+        _attach(b)
+        b.define_tick("s1", "tick", "my_func", thread_filter="RenderThread")
+        captured = []
+        async def capture(script, *a, **kw):
+            captured.append(script)
+            return ""
+        with patch.object(b, "_run_inline", side_effect=capture):
+            self._run(b.tick_compare("s1", "tick", 1.0))
+        assert 'curthread->t_name == "RenderThread"' in captured[0]
 
 
 class TestGetBackend:

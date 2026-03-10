@@ -744,8 +744,9 @@ tick-1s /secs >= {int(duration)}/ {{ printa(@stacks); exit(0); }}
             raise ValueError(f"Tick '{tick_name}' not defined. Use ctrace_define_tick first.")
         tick = session.ticks[tick_name]
         func = tick.function
+        thread_pred = f'/curthread->t_name == "{tick.thread_filter}"/ ' if tick.thread_filter else ""
         script = f"""
-pid{pid}::{func}:entry {{ self->tick_start = timestamp; self->tick_syscalls = 0; self->tick_allocs = 0; }}
+pid{pid}::{func}:entry {thread_pred}{{ self->tick_start = timestamp; self->tick_syscalls = 0; self->tick_allocs = 0; }}
 syscall:::entry /pid == {pid} && self->tick_start/ {{ self->tick_syscalls++; }}
 pid{pid}::malloc:entry /self->tick_start/ {{ self->tick_allocs++; }}
 pid{pid}::{func}:return /self->tick_start/ {{
@@ -787,8 +788,9 @@ tick-1s /secs >= {int(duration)}/ {{
             raise ValueError(f"Tick '{tick_name}' not defined.")
         tick = session.ticks[tick_name]
         func = tick.function
+        thread_pred = f'/curthread->t_name == "{tick.thread_filter}"/ ' if tick.thread_filter else ""
         script = f"""
-pid{pid}::{func}:entry {{ self->tick_start = timestamp; self->tick_syscalls = 0; self->tick_allocs = 0; self->tick_alloc_bytes = 0; }}
+pid{pid}::{func}:entry {thread_pred}{{ self->tick_start = timestamp; self->tick_syscalls = 0; self->tick_allocs = 0; self->tick_alloc_bytes = 0; }}
 syscall:::entry /pid == {pid} && self->tick_start/ {{ self->tick_syscalls++; }}
 pid{pid}::malloc:entry /self->tick_start/ {{ self->tick_allocs++; self->tick_alloc_bytes += arg0; }}
 pid{pid}::{func}:return /self->tick_start/ {{
@@ -834,8 +836,9 @@ tick-1s /secs >= {int(duration)}/ {{
             raise ValueError(f"Tick '{tick_name}' not defined.")
         tick = session.ticks[tick_name]
         func = tick.function
+        thread_pred = f'/curthread->t_name == "{tick.thread_filter}"/ ' if tick.thread_filter else ""
         script = f"""
-pid{pid}::{func}:entry {{ self->tick_start = timestamp; self->tick_syscalls = 0; self->tick_allocs = 0; }}
+pid{pid}::{func}:entry {thread_pred}{{ self->tick_start = timestamp; self->tick_syscalls = 0; self->tick_allocs = 0; }}
 syscall:::entry /pid == {pid} && self->tick_start/ {{ self->tick_syscalls++; }}
 pid{pid}::malloc:entry /self->tick_start/ {{ self->tick_allocs++; }}
 pid{pid}::{func}:return /self->tick_start/ {{
