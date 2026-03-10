@@ -3,16 +3,16 @@
 import asyncio
 import os
 import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 
 from ctrace.backend import Session, SessionManager, TickDefinition, get_backend
 from ctrace.bpftrace_backend import BpftraceBackend
 from ctrace.dtrace_backend import DTraceBackend
 
 
-def _attach(b, pid=None):
+def _attach(b, pid=None, binary="/bin/test"):
     """Create a session on the backend using the current process PID."""
-    b.sessions.create(pid=pid or os.getpid(), binary_path="/bin/test")
+    b.sessions.create(pid=pid or os.getpid(), binary_path=binary)
 
 
 class TestSession:
@@ -89,6 +89,183 @@ class TestSessionManager:
         assert result[0]["pid"] == os.getpid()
         assert result[0]["binary_path"] == "/usr/bin/test"
         assert result[0]["alive"]
+
+
+def _nm_mock(stdout, returncode=0):
+    return MagicMock(returncode=returncode, stdout=stdout, stderr="")
+
+def _cfilt_mock(stdout, returncode=0):
+    return MagicMock(returncode=returncode, stdout=stdout, stderr="")
+
+
+class TestSymbols:
+    def _backend(self, binary="/bin/test"):
+        b = BpftraceBackend()
+        _attach(b, binary=binary)
+        return b
+
+    def test_returns_text_symbol_names(self):
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock("0000000000001600 T control_loop_tick\n0000000000001700 T main\n"),
+                _cfilt_mock("control_loop_tick\nmain\n"),
+            ]
+            result = b.symbols("s1", None)
+        names = [s["mangled"] for s in result["symbols"]]
+        assert "control_loop_tick" in names
+        assert "main" in names
+        assert result["symbol_count"] == 2
+
+    def test_tick_candidate_flagged(self):
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock("0000000000001600 T update_physics\n0000000000001700 T helper\n"),
+                _cfilt_mock("update_physics\nhelper\n"),
+            ]
+            result = b.symbols("s1", None)
+        tick_names = [s["mangled"] for s in result["tick_candidates"]]
+        assert "update_physics" in tick_names
+        assert "helper" not in tick_names
+
+    def test_filter_by_name(self):
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock("0000000000001600 T tick_physics\n0000000000001700 T main\n"),
+                _cfilt_mock("tick_physics\nmain\n"),
+            ]
+            result = b.symbols("s1", "tick")
+        names = [s["mangled"] for s in result["symbols"]]
+        assert "tick_physics" in names
+        assert "main" not in names
+
+    def test_cxx_demangling(self):
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock("0000000000001600 T _Z17control_loop_ticki\n"),
+                _cfilt_mock("control_loop_tick(int)\n"),
+            ]
+            result = b.symbols("s1", None)
+        sym = result["symbols"][0]
+        assert sym["mangled"] == "_Z17control_loop_ticki"
+        assert sym["demangled"] == "control_loop_tick(int)"
+
+    def test_nm_failure_raises(self):
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = _nm_mock("", returncode=1)
+            with pytest.raises(RuntimeError, match="nm failed"):
+                b.symbols("s1", None)
+
+    def test_nm_not_found_raises(self):
+        b = self._backend()
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            with pytest.raises(RuntimeError, match="nm not found"):
+                b.symbols("s1", None)
+
+    def test_no_binary_raises(self):
+        b = BpftraceBackend()
+        _attach(b, binary=None)
+        with pytest.raises(ValueError, match="No binary path"):
+            b.symbols("s1", None)
+
+    def test_cfilt_line_count_mismatch_falls_back_to_mangled(self):
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock("0000000000001600 T sym_a\n0000000000001700 T sym_b\n"),
+                _cfilt_mock("sym_a\n"),  # one fewer line — mismatch
+            ]
+            result = b.symbols("s1", None)
+        names = [s["mangled"] for s in result["symbols"]]
+        assert "sym_a" in names
+        assert "sym_b" in names
+        # No demangled field when fallback triggered
+        assert all("demangled" not in s for s in result["symbols"])
+
+    def test_skips_compiler_artifacts(self):
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock(
+                    "0000000000001600 T __stack_chk_fail\n"
+                    "0000000000001700 T _GLOBAL__sub_I_main\n"
+                    "0000000000001800 T my_func\n"
+                ),
+                _cfilt_mock("my_func\n"),
+            ]
+            result = b.symbols("s1", None)
+        names = [s["mangled"] for s in result["symbols"]]
+        assert "__stack_chk_fail" not in names
+        assert "_GLOBAL__sub_I_main" not in names
+        assert "my_func" in names
+
+    def test_skips_non_text_symbols(self):
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock(
+                    "0000000000004010 D global_var\n"
+                    "0000000000001600 T real_func\n"
+                    "                 U external_dep\n"
+                ),
+                _cfilt_mock("real_func\n"),
+            ]
+            result = b.symbols("s1", None)
+        names = [s["mangled"] for s in result["symbols"]]
+        assert "global_var" not in names
+        assert "external_dep" not in names
+        assert "real_func" in names
+
+
+class TestThreads:
+    def test_returns_current_process_threads(self):
+        b = BpftraceBackend()
+        _attach(b)
+        result = b.threads("s1")
+        assert result["pid"] == os.getpid()
+        assert result["thread_count"] >= 1
+        assert all("tid" in t for t in result["threads"])
+        assert all("user_time_s" in t for t in result["threads"])
+        assert all("system_time_s" in t for t in result["threads"])
+
+    def test_thread_name_read_from_proc(self, tmp_path):
+        """Thread name is read from /proc/<pid>/task/<tid>/comm on Linux."""
+        comm_file = tmp_path / "comm"
+        comm_file.write_text("physics\n")
+
+        mock_thread = MagicMock()
+        mock_thread.id = 42
+        mock_thread.user_time = 1.5
+        mock_thread.system_time = 0.5
+
+        b = BpftraceBackend()
+        b.sessions.create(pid=12345)
+
+        import ctrace.backend as backend_mod
+        orig_path = backend_mod.Path
+
+        def fake_path(p):
+            if "comm" in str(p):
+                return comm_file
+            return orig_path(p)
+
+        with patch("psutil.Process") as mock_proc, \
+             patch.object(backend_mod, "Path", side_effect=fake_path):
+            mock_proc.return_value.threads.return_value = [mock_thread]
+            result = b.threads("s1")
+
+        assert result["threads"][0]["name"] == "physics"
+        assert result["threads"][0]["tid"] == 42
+
+    def test_dead_process_raises(self):
+        b = BpftraceBackend()
+        b.sessions.create(pid=999999999)
+        with pytest.raises(ValueError, match="Cannot access"):
+            b.threads("s1")
 
 
 class TestTickDefinition:

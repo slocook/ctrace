@@ -17,6 +17,41 @@ def _get_backend() -> Backend:
     return _backend
 
 
+# --- Binary & Process Inspection ---
+
+
+@mcp.tool()
+async def ctrace_symbols(
+    filter: str | None = None,
+    session_id: str | None = None,
+) -> dict:
+    """List probeable function symbols from the session binary.
+
+    Returns all text symbols with mangled names (use with ctrace_define_tick),
+    demangled names (human-readable), and tick_candidate flags for functions
+    that look like good loop targets. Use filter to narrow results by name.
+
+    Args:
+        filter: Optional substring to filter results (matches mangled or demangled name)
+        session_id: Session to inspect (optional if only one session exists)
+    """
+    return _get_backend().symbols(session_id, filter)
+
+
+@mcp.tool()
+async def ctrace_threads(session_id: str | None = None) -> dict:
+    """List all threads of the traced process with names and CPU times.
+
+    Thread names come from pthread_setname_np and can be passed directly
+    to ctrace_define_tick as thread_filter to scope tick analysis to a
+    specific thread.
+
+    Args:
+        session_id: Session to inspect (optional if only one session exists)
+    """
+    return _get_backend().threads(session_id)
+
+
 # --- Session Management ---
 
 

@@ -39,4 +39,10 @@ class TestMCPTools:
 
     def test_tool_count(self):
         tools = asyncio.run(mcp.list_tools())
-        assert len(tools) == 21
+        assert len(tools) == 23
+
+    def test_new_tools_registered(self):
+        tools = asyncio.run(mcp.list_tools())
+        tool_names = [t.name for t in tools]
+        assert "ctrace_symbols" in tool_names
+        assert "ctrace_threads" in tool_names

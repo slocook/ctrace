@@ -33,7 +33,13 @@ cd ~/.local/share/ctrace && uv sync
 claude mcp add --scope user ctrace -- uv run --directory ~/.local/share/ctrace ctrace-mcp
 ```
 
-## Tools (21)
+## Tools (23)
+
+### Binary & Process Inspection
+| Tool | Description |
+|------|-------------|
+| `ctrace_symbols` | List probeable function symbols with tick candidates and demangled names |
+| `ctrace_threads` | List threads with names and CPU times (for `thread_filter`) |
 
 ### Session Management
 | Tool | Description |
@@ -105,11 +111,11 @@ To disable SIP: boot into Recovery Mode, run `csrutil disable`. Re-enable with `
 
 ### macOS with SIP disabled
 
-All 21 tools fully functional.
+All 23 tools fully functional.
 
 ### Linux with bpftrace
 
-All 21 tools fully functional. No SIP equivalent — bpftrace just needs root (or `CAP_BPF`).
+All 23 tools fully functional. No SIP equivalent — bpftrace just needs root (or `CAP_BPF`).
 
 ```bash
 sudo apt install bpftrace  # Ubuntu/Debian

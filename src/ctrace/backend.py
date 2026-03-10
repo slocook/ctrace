@@ -19,6 +19,21 @@ from typing import Any
 # so values cannot break bpftrace (`comm == "..."`) or dtrace predicate syntax.
 _THREAD_FILTER_RE = re.compile(r'^[A-Za-z0-9_.\ -]{1,64}$')
 
+# nm symbol types to include: T/t = text (global/local), W/w = weak
+_NM_TEXT_TYPES = frozenset('Tt')
+
+# Symbol name prefixes that are compiler/runtime artifacts, not user probepoints
+_SKIP_PREFIXES = (
+    '__', '_GLOBAL_', 'Unwind_', 'frame_dummy', '_init', '_fini',
+    '_start', 'deregister_tm', 'register_tm', '.plt', 'call_weak',
+)
+
+# Keywords suggesting a function is a good tick/loop candidate
+_TICK_KEYWORDS = frozenset({
+    'tick', 'update', 'loop', 'step', 'frame', 'render', 'physics',
+    'audio', 'control', 'process', 'run_once', 'iterate', 'cycle', 'spin',
+})
+
 from ctrace.schema import Capabilities, TraceEvent, build_envelope
 
 import psutil
@@ -291,6 +306,112 @@ class Backend(ABC):
         tick = TickDefinition(name=name, function=function, thread_filter=thread_filter)
         session.ticks[name] = tick
         return {"defined": name, "function": function, "session": session.session_id}
+
+    def symbols(self, session_id: str | None, filter_str: str | None) -> dict:
+        """List probeable text symbols from the session binary using nm + c++filt.
+
+        Returns all text symbols with tick_candidate flags, plus a
+        tick_candidates shortlist for easy use with ctrace_define_tick.
+        """
+        session = self.sessions.get_default(session_id)
+        binary = session.binary_path
+        if not binary:
+            raise ValueError(
+                "No binary path for session. Use ctrace_launch to start with a known binary path."
+            )
+        try:
+            nm_result = subprocess.run(
+                ["nm", "-n", binary], capture_output=True, text=True, timeout=15
+            )
+        except FileNotFoundError:
+            raise RuntimeError("nm not found. Install binutils (Linux) or Xcode command line tools (macOS).")
+        if nm_result.returncode != 0:
+            raise RuntimeError(f"nm failed (rc={nm_result.returncode}): {nm_result.stderr.strip()}")
+
+        # Parse nm output — one pass, collect (type, mangled) for text symbols only
+        raw_symbols: list[tuple[str, str]] = []
+        for line in nm_result.stdout.splitlines():
+            parts = line.split(None, 2)
+            if len(parts) < 3:
+                continue
+            sym_type = parts[1]
+            if sym_type not in _NM_TEXT_TYPES:
+                continue
+            mangled = parts[2].strip()
+            if any(mangled.startswith(p) for p in _SKIP_PREFIXES) or mangled.startswith('.'):
+                continue
+            raw_symbols.append((sym_type, mangled))
+
+        # Batch-demangle via c++filt stdin pipe — guaranteed 1:1 input/output lines
+        demangled: list[str] = [s[1] for s in raw_symbols]  # fallback: identity
+        if raw_symbols:
+            try:
+                cfilt = subprocess.run(
+                    ["c++filt"],
+                    input="\n".join(s[1] for s in raw_symbols),
+                    capture_output=True, text=True, timeout=15,
+                )
+                lines = cfilt.stdout.splitlines()
+                if cfilt.returncode == 0 and len(lines) == len(raw_symbols):
+                    demangled = lines
+            except FileNotFoundError:
+                pass  # c++filt unavailable — use mangled names throughout
+
+        all_symbols: list[dict[str, Any]] = []
+        for (sym_type, mangled), dem in zip(raw_symbols, demangled):
+            if filter_str:
+                fl = filter_str.lower()
+                if fl not in mangled.lower() and fl not in dem.lower():
+                    continue
+            is_tick = any(kw in dem.lower() for kw in _TICK_KEYWORDS)
+            entry: dict[str, Any] = {"mangled": mangled, "type": sym_type, "tick_candidate": is_tick}
+            if dem != mangled:
+                entry["demangled"] = dem
+            all_symbols.append(entry)
+
+        all_symbols.sort(key=lambda s: (not s["tick_candidate"], s.get("demangled", s["mangled"]).lower()))
+        return {
+            "binary": binary,
+            "symbol_count": len(all_symbols),
+            "tick_candidates": [s for s in all_symbols if s["tick_candidate"]],
+            "symbols": all_symbols,
+        }
+
+    def threads(self, session_id: str | None) -> dict:
+        """List all threads of the traced process with names and CPU times.
+
+        Thread names (from pthread_setname_np) are read from
+        /proc/<pid>/task/<tid>/comm on Linux. On macOS the name field
+        is omitted when not available.
+        """
+        session = self.sessions.get_default(session_id)
+        pid = session.pid
+        try:
+            proc = psutil.Process(pid)
+            psutil_threads = proc.threads()
+        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+            raise ValueError(f"Cannot access process {pid}: {e}")
+
+        thread_list: list[dict[str, Any]] = []
+        for t in psutil_threads:
+            tid = t.id
+            info: dict[str, Any] = {
+                "tid": tid,
+                "user_time_s": round(t.user_time, 3),
+                "system_time_s": round(t.system_time, 3),
+            }
+            comm_path = Path(f"/proc/{pid}/task/{tid}/comm")
+            try:
+                info["name"] = comm_path.read_text().strip()
+            except OSError:
+                pass
+            thread_list.append(info)
+
+        return {
+            "pid": pid,
+            "thread_count": len(thread_list),
+            "threads": thread_list,
+        }
 
     def list_ticks(self, session_id: str | None) -> list[dict]:
         session = self.sessions.get_default(session_id)

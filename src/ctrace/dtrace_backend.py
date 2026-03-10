@@ -8,6 +8,8 @@ fs_usage (per-syscall tracing), profile sampling, and the magmalloc provider.
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import ctypes.util
 import re
 import signal
 import subprocess
@@ -962,3 +964,75 @@ tick-1s /secs >= {int(duration)}/ {{
             duration_s=duration, capabilities=self._dtrace_capabilities(),
             raw_output=output[:6000],
         )
+
+    # ---- macOS thread name lookup ----
+
+    def threads(self, session_id: str | None) -> dict:
+        """Override to add macOS thread names via libproc proc_pidinfo."""
+        result = super().threads(session_id)
+        names = self._macos_thread_names(result["pid"])
+        if names:
+            for t in result["threads"]:
+                if t["tid"] in names:
+                    t["name"] = names[t["tid"]]
+        return result
+
+    def _macos_thread_names(self, pid: int) -> dict[int, str]:
+        """Return {tid: name} for all named threads of pid using libproc."""
+        try:
+            libpath = ctypes.util.find_library("c")
+            if not libpath:
+                return {}
+            libc = ctypes.CDLL(libpath, use_errno=True)
+            proc_pidinfo = libc.proc_pidinfo
+            proc_pidinfo.restype = ctypes.c_int
+            proc_pidinfo.argtypes = [
+                ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                ctypes.c_void_p, ctypes.c_int,
+            ]
+
+            PROC_PIDLISTTHREADS = 6   # from <sys/proc_info.h>; size per entry = 2*sizeof(uint32_t)
+            PROC_PIDTHREADINFO = 5
+            MAXTHREADNAMESIZE = 64
+
+            buf_size = proc_pidinfo(pid, PROC_PIDLISTTHREADS, 0, None, 0)
+            if buf_size <= 0:
+                return {}
+
+            num_threads = buf_size // 8  # sizeof(uint64_t)
+            ThreadArray = ctypes.c_uint64 * num_threads
+            thread_buf = ThreadArray()
+            actual_size = proc_pidinfo(pid, PROC_PIDLISTTHREADS, 0, thread_buf, buf_size)
+            actual_threads = actual_size // 8
+
+            # struct proc_threadinfo from <sys/proc_info.h>
+            class ProcThreadInfo(ctypes.Structure):
+                _fields_ = [
+                    ("pth_user_time",   ctypes.c_uint64),
+                    ("pth_system_time", ctypes.c_uint64),
+                    ("pth_cpu_usage",   ctypes.c_int32),
+                    ("pth_policy",      ctypes.c_int32),
+                    ("pth_run_state",   ctypes.c_int32),
+                    ("pth_flags",       ctypes.c_int32),
+                    ("pth_sleep_time",  ctypes.c_int32),
+                    ("pth_curpri",      ctypes.c_int32),
+                    ("pth_priority",    ctypes.c_int32),
+                    ("pth_maxpriority", ctypes.c_int32),
+                    ("pth_name",        ctypes.c_char * MAXTHREADNAMESIZE),
+                ]
+
+            names: dict[int, str] = {}
+            for i in range(actual_threads):
+                tid = int(thread_buf[i])
+                info = ProcThreadInfo()
+                rc = proc_pidinfo(
+                    pid, PROC_PIDTHREADINFO, tid,
+                    ctypes.byref(info), ctypes.sizeof(info),
+                )
+                if rc > 0 and info.pth_name:
+                    name = info.pth_name.decode("utf-8", errors="replace").rstrip("\x00")
+                    if name:
+                        names[tid] = name
+            return names
+        except Exception:
+            return {}
