@@ -1,7 +1,8 @@
 // Test target for ctrace: simulates a real-time control loop at ~100Hz
 // with occasional latency spikes from allocations and I/O.
+// Includes C++ namespaced classes to test mangled symbol handling.
 //
-// Build: clang++ -O1 -g -o test_target tests/test_target.cpp
+// Build: clang++ -O0 -g -o test_target tests/test_target.cpp
 // Run:   ./test_target
 
 #include <atomic>
@@ -9,12 +10,75 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <pthread.h>
 #include <thread>
 #include <vector>
 #include <unistd.h>
 
 static std::atomic<bool> g_running{true};
+
+// --- C++ namespaced classes to exercise symbol mangling ---
+
+namespace engine {
+namespace subsystem {
+
+class Scheduler {
+public:
+    class TaskQueue {
+    public:
+        // Deeply nested method — produces a long mangled name
+        int Dispatch(std::shared_ptr<int> task) {
+            volatile int acc = 0;
+            for (int i = 0; i < 1000; i++) {
+                acc += i;
+            }
+            return acc;
+        }
+    };
+
+    class MetricsCollector {
+    public:
+        void EmitCounters(int channel) {
+            volatile double d = 0.0;
+            for (int i = 0; i < 500; i++) {
+                d += (double)i * 0.01;
+            }
+            (void)d;
+        }
+    };
+
+    // Method with a tick-like name in a namespace
+    void ProcessWorkItems(int iteration) {
+        TaskQueue queue;
+        auto t = std::make_shared<int>(iteration);
+        queue.Dispatch(t);
+
+        MetricsCollector mc;
+        mc.EmitCounters(iteration % 4);
+    }
+};
+
+} // namespace subsystem
+
+namespace io {
+
+class SensorBridge {
+public:
+    void UpdateState(double x, double y, double z) {
+        volatile double mag = x * x + y * y + z * z;
+        (void)mag;
+    }
+
+    int ReadRegister(int addr) {
+        return addr * 42;
+    }
+};
+
+} // namespace io
+} // namespace engine
+
+// --- Original free functions ---
 
 // Background worker: does periodic computation
 void worker_thread(const char* name) {
@@ -79,6 +143,14 @@ void control_loop_tick(int iteration) {
     if (iteration % 200 == 0 && iteration > 0) {
         usleep(5000); // 5ms spike
     }
+
+    // Exercise the C++ namespaced classes every tick
+    engine::subsystem::Scheduler sched;
+    sched.ProcessWorkItems(iteration);
+
+    engine::io::SensorBridge bridge;
+    bridge.UpdateState(1.0, 2.0, 9.8);
+    bridge.ReadRegister(0x6A);
 }
 
 int main() {

@@ -221,6 +221,311 @@ class TestSymbols:
         assert "real_func" in names
 
 
+class TestCxxSymbols:
+    """Test C++ mangled name handling — the key fix for the feature request."""
+
+    def _backend(self, binary="/bin/test"):
+        b = BpftraceBackend()
+        _attach(b, binary=binary)
+        return b
+
+    def test_macos_cxx_mangled_not_skipped(self):
+        """macOS C++ symbols start with __Z — must not be caught by __ skip prefix."""
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock(
+                    "0000000100001280 T __ZN6engine9subsystem9Scheduler9TaskQueue8DispatchENSt3__110shared_ptrIiEE\n"
+                    "0000000100001338 T __ZN6engine9subsystem9Scheduler16MetricsCollector12EmitCountersEi\n"
+                ),
+                _cfilt_mock(
+                    "engine::subsystem::Scheduler::TaskQueue::Dispatch(std::__1::shared_ptr<int>)\n"
+                    "engine::subsystem::Scheduler::MetricsCollector::EmitCounters(int)\n"
+                ),
+            ]
+            result = b.symbols("s1", None)
+        assert result["symbol_count"] == 2
+        names = [s.get("demangled", s["mangled"]) for s in result["symbols"]]
+        assert any("Dispatch" in n for n in names)
+        assert any("EmitCounters" in n for n in names)
+
+    def test_linux_cxx_mangled_not_skipped(self):
+        """Linux C++ symbols start with _Z — must not be skipped."""
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock("0000000000001280 T _ZN6engine9subsystem9Scheduler9TaskQueue8DispatchENSt3__110shared_ptrIiEE\n"),
+                _cfilt_mock("engine::subsystem::Scheduler::TaskQueue::Dispatch(std::__1::shared_ptr<int>)\n"),
+            ]
+            result = b.symbols("s1", None)
+        assert result["symbol_count"] == 1
+        assert result["symbols"][0]["demangled"] == "engine::subsystem::Scheduler::TaskQueue::Dispatch(std::__1::shared_ptr<int>)"
+
+    def test_filter_matches_demangled_cxx_name(self):
+        """filter='Dispatch' should find C++ symbols via demangled name match."""
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock(
+                    "0000000100001280 T __ZN6engine9subsystem9Scheduler9TaskQueue8DispatchENSt3__110shared_ptrIiEE\n"
+                    "0000000100001338 T __ZN6engine9subsystem9Scheduler16MetricsCollector12EmitCountersEi\n"
+                ),
+                _cfilt_mock(
+                    "engine::subsystem::Scheduler::TaskQueue::Dispatch(std::__1::shared_ptr<int>)\n"
+                    "engine::subsystem::Scheduler::MetricsCollector::EmitCounters(int)\n"
+                ),
+            ]
+            result = b.symbols("s1", "Dispatch")
+        assert result["symbol_count"] == 1
+        assert "Dispatch" in result["symbols"][0]["demangled"]
+
+    def test_filter_matches_namespace(self):
+        """filter='engine' should find all symbols in that namespace."""
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock(
+                    "0000000100001280 T __ZN6engine9subsystem9Scheduler9TaskQueue8DispatchENSt3__110shared_ptrIiEE\n"
+                    "0000000100001338 T __ZN6engine9subsystem9Scheduler16MetricsCollector12EmitCountersEi\n"
+                    "0000000100001400 T main\n"
+                ),
+                _cfilt_mock(
+                    "engine::subsystem::Scheduler::TaskQueue::Dispatch(std::__1::shared_ptr<int>)\n"
+                    "engine::subsystem::Scheduler::MetricsCollector::EmitCounters(int)\n"
+                    "main\n"
+                ),
+            ]
+            result = b.symbols("s1", "engine")
+        assert result["symbol_count"] == 2
+        assert all("engine::" in s["demangled"] for s in result["symbols"])
+
+    def test_compiler_artifacts_still_skipped(self):
+        """__stack_chk, __gxx_personality etc. still get filtered out."""
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock(
+                    "0000000000001600 T __stack_chk_fail\n"
+                    "0000000000001700 T __gxx_personality_v0\n"
+                    "0000000000001800 T __ZN6engine2io12SensorBridge12ReadRegisterEi\n"
+                ),
+                _cfilt_mock("engine::io::SensorBridge::ReadRegister(int)\n"),
+            ]
+            result = b.symbols("s1", None)
+        names = [s["mangled"] for s in result["symbols"]]
+        assert "__stack_chk_fail" not in names
+        assert "__gxx_personality_v0" not in names
+        assert len(result["symbols"]) == 1
+
+
+class TestProbePattern:
+    """Test probe_pattern generation for C and C++ symbols."""
+
+    def _backend(self, binary="/bin/test"):
+        b = BpftraceBackend()
+        _attach(b, binary=binary)
+        return b
+
+    def test_c_function_probe_pattern(self):
+        """Plain C functions get clean name as probe pattern."""
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock("0000000000001600 T control_loop_tick\n"),
+                _cfilt_mock("control_loop_tick\n"),
+            ]
+            result = b.symbols("s1", None)
+        assert result["symbols"][0]["probe_pattern"] == "control_loop_tick"
+
+    def test_c_function_with_params_probe_pattern(self):
+        """C function demangled with params strips the params."""
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock("0000000000001600 T _Z17control_loop_ticki\n"),
+                _cfilt_mock("control_loop_tick(int)\n"),
+            ]
+            result = b.symbols("s1", None)
+        assert result["symbols"][0]["probe_pattern"] == "control_loop_tick"
+
+    def test_cxx_nested_class_probe_pattern(self):
+        """C++ nested class method gets glob from last two :: components."""
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock("0000000100001280 T __ZN6engine9subsystem9Scheduler9TaskQueue8DispatchENSt3__110shared_ptrIiEE\n"),
+                _cfilt_mock("engine::subsystem::Scheduler::TaskQueue::Dispatch(std::__1::shared_ptr<int>)\n"),
+            ]
+            result = b.symbols("s1", None)
+        assert result["symbols"][0]["probe_pattern"] == "*TaskQueue*Dispatch*"
+
+    def test_cxx_simple_class_probe_pattern(self):
+        """C++ class::method gets glob from class + method."""
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock("0000000100001280 T __ZN6engine2io12SensorBridge11UpdateStateEddd\n"),
+                _cfilt_mock("engine::io::SensorBridge::UpdateState(double, double, double)\n"),
+            ]
+            result = b.symbols("s1", None)
+        assert result["symbols"][0]["probe_pattern"] == "*SensorBridge*UpdateState*"
+
+    def test_tick_candidate_cxx_method(self):
+        """C++ methods with tick keywords in name are flagged as tick candidates."""
+        b = self._backend()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                _nm_mock("0000000100001280 T __ZN6engine9subsystem9Scheduler16ProcessWorkItemsEi\n"),
+                _cfilt_mock("engine::subsystem::Scheduler::ProcessWorkItems(int)\n"),
+            ]
+            result = b.symbols("s1", None)
+        assert result["symbols"][0]["tick_candidate"] is True
+
+
+class TestResolveFunctions:
+    """Test the resolve_functions helper for ctrace_probe function mapping."""
+
+    def _symbols_result(self):
+        return {
+            "binary": "/bin/test",
+            "symbol_count": 3,
+            "tick_candidates": [],
+            "symbols": [
+                {
+                    "mangled": "__ZN6engine9subsystem9Scheduler9TaskQueue8DispatchENSt3__110shared_ptrIiEE",
+                    "type": "T",
+                    "tick_candidate": False,
+                    "demangled": "engine::subsystem::Scheduler::TaskQueue::Dispatch(std::__1::shared_ptr<int>)",
+                    "probe_pattern": "*TaskQueue*Dispatch*",
+                },
+                {
+                    "mangled": "__ZN6engine9subsystem9Scheduler16MetricsCollector12EmitCountersEi",
+                    "type": "T",
+                    "tick_candidate": False,
+                    "demangled": "engine::subsystem::Scheduler::MetricsCollector::EmitCounters(int)",
+                    "probe_pattern": "*MetricsCollector*EmitCounters*",
+                },
+                {
+                    "mangled": "control_loop_tick",
+                    "type": "T",
+                    "tick_candidate": True,
+                    "probe_pattern": "control_loop_tick",
+                },
+            ],
+        }
+
+    def test_resolve_by_class_method(self):
+        from ctrace.backend import resolve_functions
+        resolved = resolve_functions(self._symbols_result(), {
+            "dispatch": "TaskQueue::Dispatch",
+        })
+        assert resolved["dispatch"] == "*TaskQueue*Dispatch*"
+
+    def test_resolve_by_partial_name(self):
+        from ctrace.backend import resolve_functions
+        resolved = resolve_functions(self._symbols_result(), {
+            "emit": "EmitCounters",
+        })
+        assert resolved["emit"] == "*MetricsCollector*EmitCounters*"
+
+    def test_resolve_c_function(self):
+        from ctrace.backend import resolve_functions
+        resolved = resolve_functions(self._symbols_result(), {
+            "tick": "control_loop_tick",
+        })
+        assert resolved["tick"] == "control_loop_tick"
+
+    def test_resolve_case_insensitive(self):
+        from ctrace.backend import resolve_functions
+        resolved = resolve_functions(self._symbols_result(), {
+            "dispatch": "taskqueue::dispatch",
+        })
+        assert resolved["dispatch"] == "*TaskQueue*Dispatch*"
+
+    def test_resolve_not_found_raises(self):
+        from ctrace.backend import resolve_functions
+        with pytest.raises(ValueError, match="not found"):
+            resolve_functions(self._symbols_result(), {"x": "NoSuchFunction"})
+
+    def test_resolve_multiple(self):
+        from ctrace.backend import resolve_functions
+        resolved = resolve_functions(self._symbols_result(), {
+            "dispatch": "TaskQueue::Dispatch",
+            "emit": "EmitCounters",
+            "tick": "control_loop_tick",
+        })
+        assert len(resolved) == 3
+
+
+class TestProbeScriptSubstitution:
+    """Test that ctrace_probe correctly substitutes $name:entry/$name:return."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    _MOCK_SYMBOLS = {
+        "binary": "/bin/test",
+        "symbol_count": 1,
+        "tick_candidates": [],
+        "symbols": [
+            {
+                "mangled": "__ZN9TaskQueue8DispatchE",
+                "type": "T",
+                "tick_candidate": False,
+                "demangled": "engine::subsystem::Scheduler::TaskQueue::Dispatch(std::__1::shared_ptr<int>)",
+                "probe_pattern": "*TaskQueue*Dispatch*",
+            },
+        ],
+    }
+
+    def test_dtrace_function_substitution(self):
+        b = DTraceBackend()
+        b._sip_enabled = False
+        _attach(b)
+        captured = []
+        async def capture(script, *a, **kw):
+            captured.append(script)
+            return ""
+        b._run_inline = capture
+        with patch.object(b, "symbols", return_value=self._MOCK_SYMBOLS):
+            script = "$dispatch:entry { self->ts = timestamp; }\n$dispatch:return /self->ts/ { @lat = quantize((timestamp - self->ts)/1000); self->ts = 0; }"
+            self._run(b.probe("s1", script, 5.0, functions={"dispatch": "TaskQueue::Dispatch"}))
+        assert "pid" in captured[0]
+        assert "*TaskQueue*Dispatch*:entry" in captured[0]
+        assert "*TaskQueue*Dispatch*:return" in captured[0]
+        assert "$dispatch" not in captured[0]
+
+    def test_bpftrace_function_substitution(self):
+        b = BpftraceBackend()
+        _attach(b)
+        captured = []
+        async def capture(script, *a, **kw):
+            captured.append(script)
+            return ""
+        b.run_script = capture
+        with patch.object(b, "symbols", return_value=self._MOCK_SYMBOLS):
+            script = "$dispatch:entry { @start[tid] = nsecs; }\n$dispatch:return /@start[tid]/ { @lat = hist(nsecs - @start[tid]); delete(@start[tid]); }"
+            self._run(b.probe("s1", script, 5.0, functions={"dispatch": "TaskQueue::Dispatch"}))
+        assert "uprobe:" in captured[0]
+        assert "*TaskQueue*Dispatch*" in captured[0]
+        assert "uretprobe:" in captured[0]
+        assert "$dispatch" not in captured[0]
+
+    def test_probe_without_functions_unchanged(self):
+        """When functions is None, script only gets $target substituted."""
+        b = DTraceBackend()
+        b._sip_enabled = False
+        _attach(b)
+        captured = []
+        async def capture(script, *a, **kw):
+            captured.append(script)
+            return ""
+        b._run_inline = capture
+        script = "pid$target:::entry { trace(probefunc); }"
+        self._run(b.probe("s1", script, 5.0))
+        assert f"pid{os.getpid()}:::entry" in captured[0]
+
+
 class TestThreads:
     def test_returns_current_process_threads(self):
         b = BpftraceBackend()

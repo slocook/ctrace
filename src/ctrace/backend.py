@@ -22,11 +22,88 @@ _THREAD_FILTER_RE = re.compile(r'^[A-Za-z0-9_.\ -]{1,64}$')
 # nm symbol types to include: T/t = text (global/local), W/w = weak
 _NM_TEXT_TYPES = frozenset('Tt')
 
-# Symbol name prefixes that are compiler/runtime artifacts, not user probepoints
+# Symbol name prefixes that are compiler/runtime artifacts, not user probepoints.
+# NOTE: '__Z' (macOS C++ mangled names) and '_Z' (Linux) are excluded from this
+# check — see _is_skip_symbol().
 _SKIP_PREFIXES = (
-    '__', '_GLOBAL_', 'Unwind_', 'frame_dummy', '_init', '_fini',
+    '_GLOBAL_', 'Unwind_', 'frame_dummy', '_init', '_fini',
     '_start', 'deregister_tm', 'register_tm', '.plt', 'call_weak',
+    '__cxx_', '__clang_', '__gnu_', '__stack_chk', '__gxx_personality',
 )
+
+
+def _is_skip_symbol(name: str) -> bool:
+    """Return True if the symbol is a compiler/runtime artifact to skip."""
+    if name.startswith('.'):
+        return True
+    # Preserve C++ mangled names: __Z (macOS) and _Z (Linux)
+    if name.startswith(('__Z', '_Z')):
+        return False
+    if any(name.startswith(p) for p in _SKIP_PREFIXES):
+        return True
+    # Skip __ prefixed symbols that are NOT C++ mangled
+    if name.startswith('__'):
+        return True
+    return False
+
+
+def _make_probe_pattern(_mangled: str, demangled: str) -> str:
+    """Build a dtrace/bpftrace-ready probe pattern for a symbol.
+
+    For C functions (no :: in demangled name), uses the clean function name.
+    For C++ functions, the demangled name contains :: which conflicts with
+    dtrace's : field separator, so we generate a glob pattern from the
+    innermost class::method portion.
+    """
+    if '::' not in demangled:
+        # Plain C/C++ function — use demangled name without params for clean probes.
+        # e.g. "control_loop_tick(int)" -> "control_loop_tick"
+        paren_idx = demangled.find('(')
+        return demangled[:paren_idx] if paren_idx != -1 else demangled
+
+    # C++ symbol: extract the function name portion (after last ::, before parens)
+    # e.g. "engine::subsystem::Scheduler::TaskQueue::Dispatch(std::shared_ptr<int>)"
+    # We want a glob like "*TaskQueue*Dispatch*"
+    paren_idx = demangled.find('(')
+    qual_name = demangled[:paren_idx] if paren_idx != -1 else demangled
+    parts = qual_name.split('::')
+
+    # Use the last two components (class + method) for a tight glob.
+    # For deeply nested names this avoids overly broad patterns.
+    if len(parts) >= 2:
+        return f"*{parts[-2]}*{parts[-1]}*"
+    return f"*{parts[-1]}*"
+
+
+def resolve_functions(
+    symbols_result: dict,
+    functions: dict[str, str],
+) -> dict[str, str]:
+    """Resolve user-provided function names to probe patterns.
+
+    Args:
+        symbols_result: Output from Backend.symbols()
+        functions: Mapping of placeholder name -> partial function name to search for
+
+    Returns:
+        Mapping of placeholder name -> resolved probe pattern
+    """
+    resolved: dict[str, str] = {}
+    for placeholder, search_term in functions.items():
+        search_lower = search_term.lower()
+        match = None
+        for sym in symbols_result["symbols"]:
+            dem = sym.get("demangled", sym["mangled"])
+            if search_lower in dem.lower() or search_lower in sym["mangled"].lower():
+                match = sym
+                break
+        if match is None:
+            raise ValueError(
+                f"Function '{search_term}' not found in binary symbols. "
+                f"Use ctrace_symbols to list available functions."
+            )
+        resolved[placeholder] = match["probe_pattern"]
+    return resolved
 
 # Keywords suggesting a function is a good tick/loop candidate
 _TICK_KEYWORDS = frozenset({
@@ -338,7 +415,7 @@ class Backend(ABC):
             if sym_type not in _NM_TEXT_TYPES:
                 continue
             mangled = parts[2].strip()
-            if any(mangled.startswith(p) for p in _SKIP_PREFIXES) or mangled.startswith('.'):
+            if _is_skip_symbol(mangled):
                 continue
             raw_symbols.append((sym_type, mangled))
 
@@ -367,6 +444,7 @@ class Backend(ABC):
             entry: dict[str, Any] = {"mangled": mangled, "type": sym_type, "tick_candidate": is_tick}
             if dem != mangled:
                 entry["demangled"] = dem
+            entry["probe_pattern"] = _make_probe_pattern(mangled, dem)
             all_symbols.append(entry)
 
         all_symbols.sort(key=lambda s: (not s["tick_candidate"], s.get("demangled", s["mangled"]).lower()))
@@ -459,7 +537,7 @@ class Backend(ABC):
     async def tick_compare(self, session_id: str | None, tick_name: str, duration: float) -> dict: ...
 
     @abstractmethod
-    async def probe(self, session_id: str | None, script: str, duration: float) -> dict: ...
+    async def probe(self, session_id: str | None, script: str, duration: float, functions: dict[str, str] | None = None) -> dict: ...
 
     @abstractmethod
     async def snapshot(self, session_id: str | None, duration: float) -> dict: ...

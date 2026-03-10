@@ -27,12 +27,13 @@ async def ctrace_symbols(
 ) -> dict:
     """List probeable function symbols from the session binary.
 
-    Returns all text symbols with mangled names (use with ctrace_define_tick),
-    demangled names (human-readable), and tick_candidate flags for functions
-    that look like good loop targets. Use filter to narrow results by name.
+    Returns mangled name, demangled name (C++ aware), probe_pattern
+    (ready to use in dtrace/bpftrace scripts), and tick_candidate flag.
+    Searches both mangled and demangled names. For C++ symbols, probe_pattern
+    is a glob like *ClassName*Method* that avoids dtrace quoting issues.
 
     Args:
-        filter: Optional substring to filter results (matches mangled or demangled name)
+        filter: Substring to match against mangled or demangled name
         session_id: Session to inspect (optional if only one session exists)
     """
     return _get_backend().symbols(session_id, filter)
@@ -340,6 +341,7 @@ async def ctrace_list_ticks(session_id: str | None = None) -> list[dict]:
 async def ctrace_probe(
     script: str,
     duration: float = 5.0,
+    functions: dict[str, str] | None = None,
     session_id: str | None = None,
 ) -> dict:
     """Run a custom dtrace/bpftrace script. Use $target as PID placeholder.
@@ -347,10 +349,13 @@ async def ctrace_probe(
 
     Args:
         script: dtrace/bpftrace script text. Use $target for the session PID.
+            With functions, use $name:entry and $name:return as probe descriptions.
         duration: How long to run in seconds (default 5)
+        functions: Map placeholder name to partial function name for auto-resolution.
+            Example: {"dispatch": "TaskQueue::Dispatch"}. Use $dispatch:entry in script.
         session_id: Session to trace (optional if only one session exists)
     """
-    return await _get_backend().probe(session_id, script, duration)
+    return await _get_backend().probe(session_id, script, duration, functions)
 
 
 @mcp.tool()

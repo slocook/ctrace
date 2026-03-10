@@ -11,3 +11,4 @@ wheels/
 
 # Test generated files
 *.dSYM
+test_target

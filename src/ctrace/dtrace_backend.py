@@ -888,10 +888,20 @@ tick-1s /secs >= {int(duration)}/ {{ exit(0); }}
 
     # ---- General ----
 
-    async def probe(self, session_id: str | None, script: str, duration: float) -> dict:
+    async def probe(self, session_id: str | None, script: str, duration: float, functions: dict[str, str] | None = None) -> dict:
         session = self.sessions.get_default(session_id)
         pid = session.pid
         script = script.replace("$target", str(pid))
+
+        # Resolve $name:entry / $name:return placeholders for named functions
+        if functions:
+            from ctrace.backend import resolve_functions
+            symbols_result = self.symbols(session.session_id, None)
+            resolved = resolve_functions(symbols_result, functions)
+            for placeholder, pattern in resolved.items():
+                script = script.replace(f"${placeholder}:entry", f"pid{pid}::{pattern}:entry")
+                script = script.replace(f"${placeholder}:return", f"pid{pid}::{pattern}:return")
+
         output = await self._run_inline(script, duration + 2)
         return self._wrap(
             tool="ctrace_probe", session_id=session.session_id, pid=pid,
