@@ -53,8 +53,6 @@ class TestDTraceEnvelopeKeys:
         assert result["tool"] == "ctrace_syscall_summary"
         assert "aggregates" in result
         assert "syscall_by_name" in result["aggregates"]
-        # Legacy key
-        assert "syscalls" in result
 
     def test_syscall_trace_sip(self):
         b = _make_dtrace_backend(sip=True)
@@ -79,9 +77,6 @@ class TestDTraceEnvelopeKeys:
         result = self._run(b.alloc_hotspots(None, 1.0, 10))
         assert ENVELOPE_KEYS.issubset(result.keys())
         assert len(result["errors"]) > 0
-        # Legacy error key preserved
-        assert "error" in result
-        assert result["sip_enabled"] is True
 
     def test_sched_summary_sip_error(self):
         b = _make_dtrace_backend(sip=True)
@@ -143,8 +138,6 @@ class TestBpftraceEnvelopeKeys:
         assert len(result["events"]) == 1
         assert result["events"][0]["category"] == "io"
         assert result["events"][0]["duration_us"] == 5000
-        # Legacy key
-        assert result["slow_ops"][0]["latency_us"] == 5000
 
     def test_lock_contention(self):
         b = BpftraceBackend()

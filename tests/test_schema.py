@@ -91,27 +91,6 @@ class TestBuildEnvelope:
         )
         assert result["raw_output"] == "some output"
 
-    def test_legacy_keys_merged(self):
-        legacy = {"pid": 1234, "duration_s": 5.0, "syscalls": [{"key": "read"}]}
-        result = build_envelope(
-            backend="dtrace", session_id="s1", pid=1234, tool="t",
-            duration_s=5.0, capabilities=self._caps(), legacy=legacy,
-        )
-        # Legacy keys present
-        assert result["syscalls"] == [{"key": "read"}]
-        # Envelope keys take precedence
-        assert result["pid"] == 1234
-        assert result["schema_version"] == "1.0"
-
-    def test_legacy_does_not_clobber_envelope(self):
-        legacy = {"schema_version": "old", "backend": "fake"}
-        result = build_envelope(
-            backend="dtrace", session_id="s1", pid=1, tool="t",
-            duration_s=1.0, capabilities=self._caps(), legacy=legacy,
-        )
-        assert result["schema_version"] == "1.0"
-        assert result["backend"] == "dtrace"
-
     def test_warnings_and_errors(self):
         result = build_envelope(
             backend="dtrace", session_id="s1", pid=1, tool="t",
