@@ -704,6 +704,11 @@ interval:s:{int(duration)} {{ exit(); }}
                 script = script.replace(f"${placeholder}:entry", f"uprobe:{binary}:{pattern}")
                 script = script.replace(f"${placeholder}:return", f"uretprobe:{binary}:{pattern}")
 
+        # Inject a termination clause so aggregations flush cleanly via exit()
+        # instead of relying on SIGINT from the timeout, which loses print() output.
+        if "exit(" not in script:
+            script += f"\ninterval:s:1 {{ @_ctrace_secs++; }} interval:s:1 /@_ctrace_secs >= {int(duration)}/ {{ exit(); }}\n"
+
         output = await self.run_script(script, duration + 2)
         return self._wrap(
             tool="ctrace_probe", session_id=session.session_id, pid=pid,

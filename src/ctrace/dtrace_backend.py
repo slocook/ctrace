@@ -902,6 +902,11 @@ tick-1s /secs >= {int(duration)}/ {{ exit(0); }}
                 script = script.replace(f"${placeholder}:entry", f"pid{pid}::{pattern}:entry")
                 script = script.replace(f"${placeholder}:return", f"pid{pid}::{pattern}:return")
 
+        # Inject a termination clause so aggregations flush cleanly via exit()
+        # instead of relying on SIGINT from the timeout, which loses printa() output.
+        if "exit(" not in script:
+            script += f"\ntick-1s {{ _ctrace_secs++; }} tick-1s /_ctrace_secs >= {int(duration)}/ {{ exit(0); }}\n"
+
         output = await self._run_inline(script, duration + 2)
         return self._wrap(
             tool="ctrace_probe", session_id=session.session_id, pid=pid,
